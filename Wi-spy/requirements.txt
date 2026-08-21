@@ -1,0 +1,3 @@
+PyQtChart
+gps3
+python-dateutil
