@@ -1,0 +1,23 @@
+.eric6project/
+.ropeproject/
+.directory/
+*.pyc
+*.pyo
+*.orig
+*.bak
+*.rej
+*~
+cur/
+tmp/
+__pycache__/
+*.DS_Store
+controller/.venv/
+controller/state/controller.db
+controller.db
+# Fingerbank offline DB — large binary (~150 MB), downloaded by data_refresh
+sparrow_elastic/data/fingerbank.db
+
+# Playwright MCP run artifacts / ad-hoc screenshots
+.playwright-mcp/
+*-layout.png
+page-*.yml
