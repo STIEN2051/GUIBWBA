@@ -644,7 +644,7 @@ class mainWindow(QMainWindow):
         if errCode in (WirelessNetwork.ERR_NETDOWN, WirelessNetwork.ERR_OPNOTSUPPORTED, WirelessNetwork.ERR_OPNOTPERMITTED):
             if self.scanThread:
                 self.scanThread.signalStop = True
-                while self.scanThread.threadRunning:
+                while self.scanThread is not None and self.scanThread.threadRunning:
                     QApplication.processEvents()
                     sleep(0.05)
                 self.scanThread = None
@@ -830,7 +830,7 @@ class mainWindow(QMainWindow):
             self.btnBtScan.setText('&Stop')
             self.comboBtScanType.setEnabled(False)
 
-            self.bluetooth.startDiscovery(ubertooth=is_ubertooth)
+            self.bluetooth.startDiscovery(useBlueHydra=False)
             self.btTimer.start(self.btTimerTimeout)
             self.statusBar().showMessage("Bluetooth discovery active...")
         else:
