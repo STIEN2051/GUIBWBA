@@ -315,7 +315,7 @@ class BtmonThread(BaseThreadClass):
         # Ubuntu 20.04+ and bringing the interface down/up conflicts with it.
 
     def startBTMon(self):
-        self.btmonProc = subprocess.Popen(['sudo','-n','btmon'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.btmonProc = subprocess.Popen(['btmon'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 
     def startHCITool(self):
         # hcitool lescan is deprecated and fails when bluetoothd is running (Ubuntu 20.04+).
