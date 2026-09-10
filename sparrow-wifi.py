@@ -341,13 +341,27 @@ class mainWindow(QMainWindow):
         else:
             self.combo.addItem("No interfaces found")
             self.combo.setEnabled(False)
+        self.combo.currentIndexChanged.connect(self.onInterfaceChanged)
         controlsLayout.addWidget(self.combo)
+
+        # Mode badge
+        self.lblInterfaceMode = QLabel("MANAGED", tab)
+        self.lblInterfaceMode.setStyleSheet("background-color: #1565c0; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold;")
+        controlsLayout.addWidget(self.lblInterfaceMode)
+
+        # Toggle mode button
+        self.btnToggleMode = QPushButton("Set Monitor", tab)
+        self.btnToggleMode.setToolTip("Switch selected interface between Managed and Monitor mode")
+        self.btnToggleMode.clicked.connect(self.onToggleInterfaceMode)
+        controlsLayout.addWidget(self.btnToggleMode)
 
         # Rescan interfaces button
         self.btnRefreshIface = QPushButton("Rescan", tab)
         self.btnRefreshIface.setToolTip("Refresh wireless network interfaces list")
         self.btnRefreshIface.clicked.connect(self.onRescanInterfaces)
         controlsLayout.addWidget(self.btnRefreshIface)
+
+        self.onInterfaceChanged()
 
         # Scan Button
         self.btnScan = QPushButton("&Scan", tab)
@@ -403,11 +417,11 @@ class mainWindow(QMainWindow):
 
         # Network Table
         self.networkTable = QTableWidget(tab)
-        self.networkTable.setColumnCount(13)
+        self.networkTable.setColumnCount(14)
         self.networkTable.setShowGrid(True)
         self.networkTable.setHorizontalHeaderLabels([
             'MAC Address', 'Vendor', 'SSID', 'Security', 'Privacy',
-            'Channel', 'Frequency (MHz)', 'Signal (dBm)', 'Bandwidth (MHz)',
+            'Channel', 'Frequency (MHz)', 'Signal (dBm)', 'Beacons', 'Bandwidth (MHz)',
             '% Utilization', 'Stations', 'Last Seen', 'First Seen'
         ])
         self.networkTable.setRowCount(0)
@@ -592,20 +606,27 @@ class mainWindow(QMainWindow):
         self.scanRunning = pressed
 
         if not self.scanRunning:
-            if self.scanThread:
+            thread = self.scanThread
+            if thread is not None:
                 self.setCursor(Qt.WaitCursor)
-                self.scanThread.signalStop = True
-                while self.scanThread.threadRunning:
+                thread.signalStop = True
+                maxWait = 40  # 40 * 0.05 = 2 seconds max wait
+                waitCount = 0
+                while thread.threadRunning and waitCount < maxWait:
                     self.statusBar().showMessage('Waiting for active WiFi scan to finish...')
-                    QApplication.processEvents()
                     sleep(0.05)
+                    waitCount += 1
                 self.scanThread = None
                 self.setCursor(Qt.ArrowCursor)
             self.statusBar().showMessage('WiFi Scanner stopped. Ready.')
         else:
             if self.combo.count() > 0 and self.combo.isEnabled():
                 curInterface = str(self.combo.currentText())
-                self.statusBar().showMessage(f'Scanning WiFi on interface {curInterface}...')
+                is_mon = WirelessEngine.isMonitorMode(curInterface)
+                if is_mon:
+                    self.statusBar().showMessage(f'Sniffing 802.11 beacons in Monitor Mode on {curInterface}...')
+                else:
+                    self.statusBar().showMessage(f'Scanning WiFi on interface {curInterface}...')
                 if self.scanMode == "Normal" or (len(self.huntChannelList) == 0):
                     self.scanThread = ScanThread(curInterface, self)
                 else:
@@ -625,6 +646,7 @@ class mainWindow(QMainWindow):
             self.huntChannels.setEnabled(False)
             self.combo.setEnabled(False)
             self.btnRefreshIface.setEnabled(False)
+            self.btnToggleMode.setEnabled(False)
         else:
             self.btnScan.setStyleSheet("background-color: rgba(0,128,192,255); color: white; font-weight: bold; border-radius: 3px; padding: 5px 12px;")
             self.btnScan.setText('&Scan')
@@ -632,30 +654,31 @@ class mainWindow(QMainWindow):
             self.huntChannels.setEnabled(True)
             self.combo.setEnabled(True)
             self.btnRefreshIface.setEnabled(True)
+            self.btnToggleMode.setEnabled(True)
 
         self.btnScan.setShortcut('Ctrl+S')
 
     def scanResults(self, wirelessNetworks):
         if self.scanRunning:
+            curInterface = str(self.combo.currentText()) if self.combo.count() > 0 else ""
+            if WirelessEngine.isMonitorMode(curInterface):
+                total_beacons = sum(getattr(n, 'beaconCount', 0) for n in wirelessNetworks.values())
+                self.statusBar().showMessage(f"Monitor Mode active on {curInterface}: {len(wirelessNetworks)} Access Point(s) detected, {total_beacons} Beacon frame(s) captured.")
             self.populateTable(wirelessNetworks)
 
     def onErrMsg(self, errCode, errMsg):
-        self.statusBar().showMessage(f"Error [{errCode}]: {errMsg}")
-        if errCode in (WirelessNetwork.ERR_NETDOWN, WirelessNetwork.ERR_OPNOTSUPPORTED, WirelessNetwork.ERR_OPNOTPERMITTED):
-            if self.scanThread:
-                self.scanThread.signalStop = True
-                while self.scanThread is not None and self.scanThread.threadRunning:
-                    QApplication.processEvents()
-                    sleep(0.05)
-                self.scanThread = None
-                self.scanRunning = False
-                self.btnScan.setChecked(False)
-                self.btnScan.setStyleSheet("background-color: rgba(0,128,192,255); color: white; font-weight: bold; border-radius: 3px; padding: 5px 12px;")
-                self.btnScan.setText('&Scan')
-                self.scanModeCombo.setEnabled(True)
-                self.huntChannels.setEnabled(True)
-                self.combo.setEnabled(True)
-                self.btnRefreshIface.setEnabled(True)
+        # Show a non-fatal status message. Do NOT auto-kill the scan thread
+        # on transient errors (ERR_NETDOWN, ERR_OPNOTPERMITTED, etc.).
+        # The scan loop will retry on the next iteration, and the nmcli
+        # fallback in scanForNetworks() handles most of these gracefully.
+        if errCode == WirelessNetwork.ERR_NETDOWN:
+            self.statusBar().showMessage(f"⚠ Interface may be down — retrying... ({errMsg})")
+        elif errCode == WirelessNetwork.ERR_OPNOTPERMITTED:
+            self.statusBar().showMessage(f"⚠ Falling back to nmcli scan (no root): {errMsg}")
+        elif errCode == WirelessNetwork.ERR_OPNOTSUPPORTED:
+            self.statusBar().showMessage(f"⚠ Interface in monitor mode — using passive capture: {errMsg}")
+        else:
+            self.statusBar().showMessage(f"Status [{errCode}]: {errMsg}")
 
     def populateUpdateExisting(self, wirelessNetworks):
         numRows = self.networkTable.rowCount()
@@ -679,13 +702,20 @@ class mainWindow(QMainWindow):
                     self.networkTable.item(curRow, 5).setText(str(curNet.getChannelString()))
                     self.networkTable.item(curRow, 6).setText(str(curNet.frequency))
                     self.networkTable.item(curRow, 7).setText(str(curNet.signal))
-                    self.networkTable.item(curRow, 8).setText(str(curNet.bandwidth))
-                    self.networkTable.item(curRow, 9).setText(str(curNet.utilization))
-                    self.networkTable.item(curRow, 10).setText(str(curNet.stationcount))
-                    self.networkTable.item(curRow, 11).setText(curNet.lastSeen.strftime("%m/%d/%Y %H:%M:%S"))
+
+                    # Update beacons: accumulate with previous count
+                    if hasattr(curData, 'beaconCount'):
+                        curNet.beaconCount += curData.beaconCount
+                    beaconText = str(curNet.beaconCount) if curNet.beaconCount > 0 else "-"
+                    self.networkTable.item(curRow, 8).setText(beaconText)
+
+                    self.networkTable.item(curRow, 9).setText(str(curNet.bandwidth))
+                    self.networkTable.item(curRow, 10).setText(str(curNet.utilization))
+                    self.networkTable.item(curRow, 11).setText(str(curNet.stationcount))
+                    self.networkTable.item(curRow, 12).setText(curNet.lastSeen.strftime("%m/%d/%Y %H:%M:%S"))
 
                     curNet.firstSeen = curData.firstSeen
-                    self.networkTable.item(curRow, 12).setText(curNet.firstSeen.strftime("%m/%d/%Y %H:%M:%S"))
+                    self.networkTable.item(curRow, 13).setText(curNet.firstSeen.strftime("%m/%d/%Y %H:%M:%S"))
 
                     curNet.foundInList = True
                     self.networkTable.item(curRow, 2).setData(Qt.UserRole + 1, curNet)
@@ -725,17 +755,19 @@ class mainWindow(QMainWindow):
                 ssidItem.setData(Qt.UserRole + 1, curNet)
                 self.networkTable.setItem(0, 2, ssidItem)
 
-                # Columns 3-12: Properties
+                # Columns 3-13: Properties
                 self.networkTable.setItem(0, 3, QTableWidgetItem(curNet.security))
                 self.networkTable.setItem(0, 4, QTableWidgetItem(curNet.privacy))
                 self.networkTable.setItem(0, 5, IntTableWidgetItem(str(curNet.getChannelString())))
                 self.networkTable.setItem(0, 6, IntTableWidgetItem(str(curNet.frequency)))
                 self.networkTable.setItem(0, 7, IntTableWidgetItem(str(curNet.signal)))
-                self.networkTable.setItem(0, 8, IntTableWidgetItem(str(curNet.bandwidth)))
-                self.networkTable.setItem(0, 9, FloatTableWidgetItem(str(curNet.utilization)))
-                self.networkTable.setItem(0, 10, IntTableWidgetItem(str(curNet.stationcount)))
-                self.networkTable.setItem(0, 11, DateTableWidgetItem(curNet.lastSeen.strftime("%m/%d/%Y %H:%M:%S")))
-                self.networkTable.setItem(0, 12, DateTableWidgetItem(curNet.firstSeen.strftime("%m/%d/%Y %H:%M:%S")))
+                beaconStr = str(curNet.beaconCount) if curNet.beaconCount > 0 else "-"
+                self.networkTable.setItem(0, 8, IntTableWidgetItem(beaconStr))
+                self.networkTable.setItem(0, 9, IntTableWidgetItem(str(curNet.bandwidth)))
+                self.networkTable.setItem(0, 10, FloatTableWidgetItem(str(curNet.utilization)))
+                self.networkTable.setItem(0, 11, IntTableWidgetItem(str(curNet.stationcount)))
+                self.networkTable.setItem(0, 12, DateTableWidgetItem(curNet.lastSeen.strftime("%m/%d/%Y %H:%M:%S")))
+                self.networkTable.setItem(0, 13, DateTableWidgetItem(curNet.firstSeen.strftime("%m/%d/%Y %H:%M:%S")))
 
             self.ageOut()
 
@@ -802,18 +834,79 @@ class mainWindow(QMainWindow):
         finally:
             self.updateLock.release()
 
-    def onRescanInterfaces(self):
+    def onInterfaceChanged(self):
+        if self.combo.count() > 0 and self.combo.isEnabled():
+            iface = str(self.combo.currentText())
+            mode = WirelessEngine.getInterfaceMode(iface)
+            if mode == 'monitor':
+                self.lblInterfaceMode.setText("MONITOR")
+                self.lblInterfaceMode.setStyleSheet("background-color: #2e7d32; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold;")
+                self.btnToggleMode.setText("Set Managed")
+            elif mode == 'managed':
+                self.lblInterfaceMode.setText("MANAGED")
+                self.lblInterfaceMode.setStyleSheet("background-color: #1565c0; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold;")
+                self.btnToggleMode.setText("Set Monitor")
+            else:
+                self.lblInterfaceMode.setText(mode.upper())
+                self.lblInterfaceMode.setStyleSheet("background-color: #757575; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold;")
+                self.btnToggleMode.setText("Set Monitor")
+
+    def onToggleInterfaceMode(self):
+        if self.combo.count() == 0 or not self.combo.isEnabled():
+            return
+        if self.scanRunning:
+            QMessageBox.warning(self, "Scan Active", "Please stop the active scan before changing interface mode.", QMessageBox.Ok)
+            return
+
+        iface = str(self.combo.currentText())
+        currentMode = WirelessEngine.getInterfaceMode(iface)
+        targetMode = 'managed' if currentMode == 'monitor' else 'monitor'
+        driver = WirelessEngine.getInterfaceDriver(iface)
+
+        self.setCursor(Qt.WaitCursor)
+        self.statusBar().showMessage(f"Switching {iface} to {targetMode} mode...")
+        QApplication.processEvents()
+
+        ok, msg = WirelessEngine.setInterfaceMode(iface, targetMode)
+        self.setCursor(Qt.ArrowCursor)
+
+        expected_iface = None
+        if targetMode == 'monitor' and (driver == 'iwlwifi' or 'iwlwifi' in str(driver)):
+            expected_iface = f"{iface}mon"
+        elif targetMode == 'managed' and iface.endswith('mon'):
+            expected_iface = iface[:-3]
+        else:
+            expected_iface = iface
+
+        self.onRescanInterfaces(selectInterface=expected_iface)
+        self.statusBar().showMessage(msg)
+        if not ok:
+            QMessageBox.information(
+                self,
+                "Monitor Mode Setup",
+                f"{msg}\n\nTip: You can also configure monitor mode via terminal using:\n  sudo ./setup_sparrow.sh",
+                QMessageBox.Ok
+            )
+
+    def onRescanInterfaces(self, selectInterface=None):
+        self.combo.blockSignals(True)
         self.combo.clear()
         interfaces = WirelessEngine.getInterfaces()
         if len(interfaces) > 0:
             for curInterface in interfaces:
                 self.combo.addItem(curInterface)
             self.combo.setEnabled(True)
+            if selectInterface and selectInterface in interfaces:
+                idx = self.combo.findText(selectInterface)
+                if idx >= 0:
+                    self.combo.setCurrentIndex(idx)
             self.statusBar().showMessage(f"Found {len(interfaces)} wireless interface(s).")
         else:
             self.combo.addItem("No interfaces found")
             self.combo.setEnabled(False)
             self.statusBar().showMessage("No wireless interfaces found.")
+        self.combo.blockSignals(False)
+        self.onInterfaceChanged()
 
     # ------------------ Bluetooth Scanning & Table Handlers ------------------
     def onBtScanClicked(self, pressed):
@@ -1106,15 +1199,25 @@ class mainWindow(QMainWindow):
                             newNet.channel = int(channelstr) if channelstr.isdigit() else 1
                         newNet.frequency = int(row[6]) if len(row) > 6 and row[6].isdigit() else 2412
                         newNet.signal = int(row[7]) if len(row) > 7 else -90
-                        newNet.bandwidth = int(row[9]) if len(row) > 9 and row[9].isdigit() else 20
-                        if len(row) > 10:
+
+                        if len(row) >= 14:
+                            newNet.beaconCount = int(row[8]) if row[8].isdigit() else 0
+                            newNet.bandwidth = int(row[9]) if row[9].isdigit() else 20
+                            last_seen_idx = 12
+                            first_seen_idx = 13
+                        else:
+                            newNet.bandwidth = int(row[8]) if len(row) > 8 and row[8].isdigit() else 20
+                            last_seen_idx = 11
+                            first_seen_idx = 12
+
+                        if len(row) > last_seen_idx:
                             try:
-                                newNet.lastSeen = parser.parse(row[10])
+                                newNet.lastSeen = parser.parse(row[last_seen_idx])
                             except Exception:
                                 pass
-                        if len(row) > 11:
+                        if len(row) > first_seen_idx:
                             try:
-                                newNet.firstSeen = parser.parse(row[11])
+                                newNet.firstSeen = parser.parse(row[first_seen_idx])
                             except Exception:
                                 pass
                         wirelessNetworks[newNet.getKey()] = newNet
@@ -1160,15 +1263,16 @@ class mainWindow(QMainWindow):
         self.updateLock.acquire()
         try:
             with open(fileName, 'w', newline='', encoding='utf-8') as outputFile:
-                outputFile.write('macAddr,vendor,SSID,Security,Privacy,Channel,Frequency,Signal Strength,Bandwidth,% Utilization,# of Stations,Last Seen,First Seen\n')
+                outputFile.write('macAddr,vendor,SSID,Security,Privacy,Channel,Frequency,Signal Strength,Beacons,Bandwidth,% Utilization,# of Stations,Last Seen,First Seen\n')
                 numItems = self.networkTable.rowCount()
                 for i in range(0, numItems):
                     curData = self.networkTable.item(i, 2).data(Qt.UserRole + 1)
                     if curData:
                         vendor = self.networkTable.item(i, 1).text() if self.networkTable.item(i, 1) else ''
+                        beaconCount = getattr(curData, 'beaconCount', 0)
                         outputFile.write(
                             f'"{curData.macAddr}","{vendor}","{curData.ssid}","{curData.security}","{curData.privacy}",'
-                            f'{curData.getChannelString()},{curData.frequency},{curData.signal},{curData.bandwidth},'
+                            f'{curData.getChannelString()},{curData.frequency},{curData.signal},{beaconCount},{curData.bandwidth},'
                             f'{curData.utilization},{curData.stationcount},'
                             f'"{curData.lastSeen.strftime("%m/%d/%Y %H:%M:%S")}","{curData.firstSeen.strftime("%m/%d/%Y %H:%M:%S")}"\n'
                         )

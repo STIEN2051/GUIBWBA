@@ -68,7 +68,16 @@ class BluetoothDevice(object):
         self.strongestgps = SparrowGPS()
         
         self.foundInList = False
-        
+    
+    @property
+    def macAddr(self):
+        """Alias for macAddress, for backward compatibility."""
+        return self.macAddress
+
+    @macAddr.setter
+    def macAddr(self, value):
+        self.macAddress = value
+
     def __str__(self):
         retVal = ""
         retVal += "UUID: " + self.uuid + '\n'
@@ -289,230 +298,186 @@ class BluetoothDevice(object):
 class BtmonThread(BaseThreadClass):
     def __init__(self, parentBluetooth):
         super().__init__()
-        self.parentBluetooth= parentBluetooth
+        self.parentBluetooth = parentBluetooth
         self.hcitoolProc = None
-        self.btmonProc = None
         self.daemon = True
-        
-    def getFieldValue(self, p, curLine):
-        matchobj = p.search(curLine)
-        
-        if not matchobj:
-            return ""
-            
-        try:
-            retVal = matchobj.group(1)
-        except:
-            retVal = ""
-            
-        return retVal
-        
+
     def resetDevice(self):
-        # Kill btmon and any bluetoothctl scanning session
-        subprocess.run(['pkill', 'btmon'], stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        subprocess.run(['pkill', 'bluetoothctl'], stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        # Do NOT call hciconfig down/up — bluetoothd holds exclusive HCI access on
-        # Ubuntu 20.04+ and bringing the interface down/up conflicts with it.
-
-    def startBTMon(self):
-        self.btmonProc = subprocess.Popen(['btmon'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-
-    def startHCITool(self):
-        # hcitool lescan is deprecated and fails when bluetoothd is running (Ubuntu 20.04+).
-        # Use bluetoothctl instead: open a persistent session and send "scan on" via stdin.
-        # The process stays alive keeping the scan active; killing it also stops the scan.
-        self.hcitoolProc = subprocess.Popen(
-            ['bluetoothctl'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
         try:
-            self.hcitoolProc.stdin.write(b'scan on\n')
-            self.hcitoolProc.stdin.flush()
-        except:
+            subprocess.run(['pkill', '-f', 'bluetoothctl'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
             pass
 
-    def btMonRunning(self):
-        if not self.btmonProc:
-            return False
-            
-        pollrunning = self.btmonProc.poll() is None
-        
-        return pollrunning
-        
-    def hcitoolRunning(self):
-        if not self.hcitoolProc:
-            return False
-            
-        pollrunning = self.hcitoolProc.poll() is None
-        
-        return pollrunning
-        
-    def stopAndWait(self):
-        super().stopAndWait()
-        if self.threadRunning:
-            # May be stuck at readline
-            if self.btmonProc:
-                self.btmonProc.kill()
+    def syncKnownDevices(self):
+        """Synchronize devices cached or discovered by bluetoothctl into the device list."""
+        try:
+            res = subprocess.run(['bluetoothctl', 'devices'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3)
+            if res.returncode == 0:
+                p = re.compile(r'Device\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\s*(.*)')
+                for line in res.stdout.splitlines():
+                    m = p.search(line.strip())
+                    if m:
+                        mac = m.group(1).upper()
+                        name = m.group(2).strip()
+                        self.parentBluetooth.deviceLock.acquire()
+                        try:
+                            if mac not in self.parentBluetooth.devices:
+                                dev = BluetoothDevice()
+                                dev.macAddress = mac
+                                dev.name = name
+                                dev.btType = BluetoothDevice.BT_LE
+                                self.parentBluetooth.devices[mac] = dev
+                            elif name and not self.parentBluetooth.devices[mac].name:
+                                self.parentBluetooth.devices[mac].name = name
+                        finally:
+                            self.parentBluetooth.deviceLock.release()
+        except Exception:
+            pass
 
-            if self.hcitoolProc:
-                # Ask bluetoothd to stop scanning before killing the session
+    def stopAndWait(self):
+        self.signalStop = True
+        if self.hcitoolProc:
+            try:
+                self.hcitoolProc.stdin.write("scan off\n")
+                self.hcitoolProc.stdin.flush()
+            except Exception:
+                pass
+            try:
+                self.hcitoolProc.terminate()
+                self.hcitoolProc.wait(timeout=1)
+            except Exception:
                 try:
-                    self.hcitoolProc.stdin.write(b'scan off\n')
-                    self.hcitoolProc.stdin.flush()
-                except:
+                    self.hcitoolProc.kill()
+                except Exception:
                     pass
-                self.hcitoolProc.kill()
+            self.hcitoolProc = None
+        super().stopAndWait()
 
     def run(self):
         self.threadRunning = True
-        
-        # See this for a good example on threading and reading from a streaming proc
-        # https://stackoverflow.com/questions/16768290/understanding-popen-communicate
-
-        # Reset interface.  Have had hcitool lescan fail on bad parameters
         self.resetDevice()
-        
-        # Just a basic sleep for 1 second example loop.
-        # Instantiate and call start() to get it going
-        
-        iteration = 0
 
-        # Have to start hcitool first because it will set the radio.
-        # If you try to start btmon first, it may lock it and cause hcitool to fail
-        self.startHCITool()
-        self.startBTMon()
-        
-        p_address = re.compile('Address: ([0-9A-F]{2,2}:[0-9A-F]{2,2}:[0-9A-F]{2,2}:[0-9A-F]{2,2}:[0-9A-F]{2,2}:[0-9A-F]{2,2})')
-        p_company = re.compile(r'Company: (.*) \(')
-        # p_type = re.compile('Type: (.*?) (')
-        p_rssi = re.compile(r'RSSI: (-?[0-9]+) dBm.*')
-        p_txpower = re.compile('TX power: (.*?) dB.*')
-        p_uuid = re.compile('UUID: (.*)')
-        p_name = re.compile('Name.*?: (.*)')
-        # p_eventType = re.compile('Event type: (.*)')
-        
-        curDevice = None
-        # eventType = ""
-        
+        # Check if bluetooth.service is active
+        try:
+            srv = subprocess.run(['systemctl', 'is-active', 'bluetooth'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+            if srv.stdout.strip() != 'active':
+                print("WARNING: bluetooth service is inactive. Run: sudo systemctl enable --now bluetooth")
+        except Exception:
+            pass
+
+        # Start bluetoothctl in interactive streaming mode
+        try:
+            self.hcitoolProc = subprocess.Popen(
+                ['bluetoothctl'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            # Send power on and scan on commands
+            self.hcitoolProc.stdin.write("power on\nscan on\n")
+            self.hcitoolProc.stdin.flush()
+        except Exception as e:
+            print(f"ERROR: Failed to launch bluetoothctl: {e}")
+            self.threadRunning = False
+            return
+
+        # Perform initial sync of already known devices
+        self.syncKnownDevices()
+
+        p_dev = re.compile(r'(?:\[(NEW|CHG)\]\s+)?Device\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})(?:\s+(.*))?')
+        p_rssi = re.compile(r'RSSI:\s+(-?[0-9]+)')
+        p_txpower = re.compile(r'TxPower:\s+(-?[0-9]+)')
+        p_name = re.compile(r'(?:Name|Alias):\s+(.*)')
+
+        sync_counter = 0
+
         while not self.signalStop:
-            if not self.hcitoolRunning():
-                # May have died
-                # Note: btmon can still keep running even over an HCI reset
-                self.resetDevice()
-                self.startHCITool()
-                
-            if not self.btMonRunning():
-                self.startBTMon()
-                
-            curLine = self.btmonProc.stdout.readline().decode('UTF-8').replace('\n', '')
+            sync_counter += 1
+            if sync_counter % 30 == 0:
+                self.syncKnownDevices()
 
-            # Address
-            fieldValue = self.getFieldValue(p_address, curLine)
-                
-            if (len(fieldValue) > 0):
-                curDevice = BluetoothDevice()
-                # eventType = ""
-                # Just doing this scan for LE now.
-                curDevice.btType = BluetoothDevice.BT_LE                
-                # This will start a new bluetooth device
-                curDevice.macAddress = fieldValue
-            
-            # Name
-            if 'Company' in curLine:
-                pass
-                
-            fieldValue = self.getFieldValue(p_name, curLine)
-                
-            if (len(fieldValue) > 0):
-                # This will start a new bluetooth device
-                curDevice.name = fieldValue
-        
-            # UUID
-            fieldValue = self.getFieldValue(p_uuid, curLine)
-                
-            if (len(fieldValue) > 0):
-                # This will start a new bluetooth device
-                curDevice.uuid = fieldValue
-        
-            # Company
-            fieldValue = self.getFieldValue(p_company, curLine)
-                
-            if (len(fieldValue) > 0):
-                # This will start a new bluetooth device
-                curDevice.company = fieldValue
-        
-            # Event Type
-            # eventType = self.getFieldValue(p_eventType, curLine)
-                
-            # TX Power
-            fieldValue = self.getFieldValue(p_txpower, curLine)
-                
-            if (len(fieldValue) > 0):
-                # This will start a new bluetooth
+            if self.hcitoolProc.poll() is not None:
                 try:
-                    tmpPower = int(fieldValue)
-                    
-                    # If there's an error in the data or pattern rec,
-                    # There's no way "Low Energy" would transmit with 0+ dBm.  That's not LE.
-                    if tmpPower < 0:
-                        curDevice.txPower = tmpPower
-                        curDevice.txPowerValid = True
-                except:
-                    pass
-                
-            # RSSI - Will end the block
-            fieldValue = self.getFieldValue(p_rssi, curLine)
-                
-            if (len(fieldValue) > 0):
-                # This will start a new bluetooth device
+                    self.hcitoolProc = subprocess.Popen(
+                        ['bluetoothctl'],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1
+                    )
+                    self.hcitoolProc.stdin.write("power on\nscan on\n")
+                    self.hcitoolProc.stdin.flush()
+                except Exception:
+                    break
+
+            try:
+                line = self.hcitoolProc.stdout.readline()
+                if not line:
+                    sleep(0.05)
+                    continue
+                line = line.strip()
+            except Exception:
+                break
+
+            m = p_dev.search(line)
+            if m:
+                mac = m.group(2).upper()
+                rest = m.group(3) or ""
+
+                rssi_m = p_rssi.search(rest)
+                tx_m = p_txpower.search(rest)
+                name_m = p_name.search(rest)
+
+                self.parentBluetooth.deviceLock.acquire()
                 try:
-                    curDevice.rssi = int(fieldValue)
-                    curDevice.strongestRssi = curDevice.rssi
-                    curDevice.calcRange()
-                except:
-                    pass
-                
-                if curDevice and len(curDevice.macAddress) > 0:
-                    self.parentBluetooth.deviceLock.acquire()
-                    
-                    if curDevice.macAddress in self.parentBluetooth.devices:
-                        # We may not always get some fields
-                        lastDevice = self.parentBluetooth.devices[curDevice.macAddress]
-                        curDevice.firstSeen = lastDevice.firstSeen  # copy first seen timestamp
-                        curDevice.gps.copy(lastDevice.gps)
-                        curDevice.strongestgps.copy(lastDevice.strongestgps)
-                        
-                        if len(lastDevice.name) > 0 and len(curDevice.name) == 0:
-                            curDevice.name = lastDevice.name
-                        if len(lastDevice.uuid) > 0 and len(curDevice.uuid) == 0:
-                            curDevice.uuid = lastDevice.uuid
-                        if lastDevice.txPowerValid and not curDevice.txPowerValid:
-                            curDevice.txPower = lastDevice.txPower
-                            curDevice.txPowerValid = lastDevice.txPowerValid
-                            
-                    self.parentBluetooth.devices[curDevice.macAddress] = curDevice
+                    if mac in self.parentBluetooth.devices:
+                        dev = self.parentBluetooth.devices[mac]
+                    else:
+                        dev = BluetoothDevice()
+                        dev.macAddress = mac
+                        dev.btType = BluetoothDevice.BT_LE
+                        self.parentBluetooth.devices[mac] = dev
+
+                    dev.lastSeen = datetime.datetime.now()
+
+                    if name_m:
+                        dev.name = name_m.group(1).strip()
+                    elif rest and not any(rest.startswith(k) for k in ('RSSI:', 'TxPower:', 'ManufacturerData', 'UUIDs:', 'Services:', 'Connected:', 'Paired:', 'Trusted:', 'Blocked:', 'LegacyPairing:', 'RSSI ')):
+                        dev.name = rest.strip()
+
+                    if rssi_m:
+                        try:
+                            dev.rssi = int(rssi_m.group(1))
+                            if dev.rssi > dev.strongestRssi:
+                                dev.strongestRssi = dev.rssi
+                            dev.calcRange()
+                        except Exception:
+                            pass
+
+                    if tx_m:
+                        try:
+                            dev.txPower = int(tx_m.group(1))
+                            dev.txPowerValid = True
+                            dev.calcRange()
+                        except Exception:
+                            pass
+                finally:
                     self.parentBluetooth.deviceLock.release()
-                
-            # Just give the thread a chance to release resources
-            iteration += 1
-            if iteration > 50000:
-                iteration = 0
-                sleep(0.01)
 
-        try:
-            self.hcitoolProc.kill()
-        except:
-            pass
-            
-        try:
-            self.btmonProc.kill()
-        except:
-            pass
-        
-        self.resetDevice()
-        
+        # Stop scan when exiting
+        if self.hcitoolProc:
+            try:
+                self.hcitoolProc.stdin.write("scan off\n")
+                self.hcitoolProc.stdin.flush()
+                self.hcitoolProc.terminate()
+            except Exception:
+                pass
+            self.hcitoolProc = None
+
         self.threadRunning = False
 
 # ------------------  Ubertooth Specan scanning Thread ----------------------------------
@@ -744,6 +709,8 @@ class SparrowBluetooth(object):
                         self.devices[curDevice.macAddress] = curDevice
                 self.deviceLock.release()                            
         else:
+            if self.btmonThread:
+                self.btmonThread.syncKnownDevices()
             errcode = 0
             
         return errcode
@@ -766,7 +733,7 @@ class SparrowBluetooth(object):
                 
         return errcode, retList
         
-    def startDiscovery(self, useBlueHydra=True):
+    def startDiscovery(self, useBlueHydra=False):
         self.devices.clear()
         
         if useBlueHydra:

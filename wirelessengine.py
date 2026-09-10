@@ -104,7 +104,9 @@ channelToFreq['188'] = '4940'
 channelToFreq['189'] = '4945'
 channelToFreq['192'] = '4960'
 channelToFreq['196'] = '4980'
-   
+
+freqToChannel = {v: k for k, v in channelToFreq.items()}
+
 # ------------------  Interface detection -------------------------------------
 # Cached result of which tool is available for listing wireless interfaces.
 # None means not yet determined. Set on first call to getInterfaces().
@@ -112,9 +114,9 @@ interfaceApp = None
 
 _INTERFACE_APPS = [
     # (executable, full command, regex to extract interface names)
-    ('iwconfig', ['iwconfig'],                                               r'^(w.*?) .*'),
-    ('iw',       ['iw', 'dev'],                                              r'Interface (w[a-z0-9]+)'),
-    ('nmcli',    ['nmcli', '--colors', 'no', '--terse', 'device', 'status'], r'^(w[a-z0-9]+):wifi:'),
+    ('iw',       ['iw', 'dev'],                                              r'Interface\s+([a-zA-Z0-9_\-]+)'),
+    ('iwconfig', ['iwconfig'],                                               r'^([a-zA-Z0-9_\-]+)\s+.*(?:IEEE|Mode:|ESSID)'),
+    ('nmcli',    ['nmcli', '--colors', 'no', '--terse', 'device', 'status'], r'^([a-zA-Z0-9_\-]+):wifi:'),
 ]
 
 def _findInterfaceApp():
@@ -310,6 +312,7 @@ class WirelessNetwork(object):
         now=datetime.datetime.now()
         self.firstSeen = now
         self.lastSeen = now
+        self.beaconCount = 0
         self.gps = SparrowGPS()
         self.strongestsignal = self.signal
         self.strongestgps = SparrowGPS()
@@ -338,6 +341,7 @@ class WirelessNetwork(object):
         retVal += "Utilization: " + str(self.utilization) + "\n"
         retVal += "Strongest Signal: " + str(self.strongestsignal) + " dBm\n"
         retVal += "Bandwidth: " + str(self.bandwidth) + "\n"
+        retVal += "Beacons: " + str(self.beaconCount) + "\n"
         retVal += "First Seen: " + str(self.firstSeen) + "\n"
         retVal += "Last Seen: " + str(self.lastSeen) + "\n"
         retVal += "Last GPS:\n"
@@ -402,6 +406,7 @@ class WirelessNetwork(object):
         self.utilization = float(dictjson['utilization'])
         self.strongestsignal = int(dictjson['strongestsignal'])
         self.bandwidth = int(dictjson['bandwidth'])
+        self.beaconCount = int(dictjson.get('beaconCount', 0))
         self.firstSeen = parser.parse(dictjson['firstseen'])
         self.lastSeen = parser.parse(dictjson['lastseen'])
         self.gps.latitude = float(dictjson['lat'])
@@ -440,6 +445,7 @@ class WirelessNetwork(object):
 
         dictjson['strongestsignal'] = self.strongestsignal
         dictjson['bandwidth'] = self.bandwidth
+        dictjson['beaconCount'] = self.beaconCount
         dictjson['firstseen'] = str(self.firstSeen)
         dictjson['lastseen'] = str(self.lastSeen)
         dictjson['lat'] = str(self.gps.latitude)
@@ -554,7 +560,9 @@ class WirelessEngine(object):
             return ssid
         
     def getInterfaces(printResults=False) -> list:
-        """ Returns a list of wireless interfaces using iwconfig, iw, or nmcli (whichever is available). """
+        """ Returns a list of wireless interfaces using iw, iwconfig, or nmcli.
+            Interfaces that are UP / connected are listed first.
+        """
         global interfaceApp
         if interfaceApp is None:
             interfaceApp = _findInterfaceApp()
@@ -563,20 +571,38 @@ class WirelessEngine(object):
 
         if interfaceApp is None:
             if printResults:
-                print("Error: No wireless interface tool (iwconfig/iw/nmcli) found.")
+                print("Error: No wireless interface tool (iw/iwconfig/nmcli) found.")
             return retVal
 
         cmd, pattern = interfaceApp
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        wireless_result = result.stdout.decode('UTF-8')
-        tmpInterfaces = re.findall(pattern, wireless_result, re.MULTILINE)
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            wireless_result = result.stdout.decode('UTF-8', errors='ignore')
+            tmpInterfaces = re.findall(pattern, wireless_result, re.MULTILINE)
+        except Exception:
+            tmpInterfaces = []
 
         if tmpInterfaces:
+            seen = set()
             for curInterface in tmpInterfaces:
-                tmpStr = curInterface.replace(' ', '')
-                retVal.append(tmpStr)
-                if printResults:
-                    print(tmpStr)
+                tmpStr = curInterface.replace(' ', '').strip()
+                if tmpStr and tmpStr not in seen:
+                    seen.add(tmpStr)
+                    retVal.append(tmpStr)
+
+            def _iface_priority(iface_name):
+                try:
+                    with open(f"/sys/class/net/{iface_name}/operstate", "r") as f:
+                        state = f.read().strip().lower()
+                        return 0 if state == "up" else 1
+                except Exception:
+                    return 2
+
+            retVal.sort(key=_iface_priority)
+
+            if printResults:
+                for iface in retVal:
+                    print(iface)
         else:
             if printResults:
                 print("Error: No wireless interfaces found.")
@@ -706,39 +732,483 @@ class WirelessEngine(object):
         
         return retCode, errString, jsonstr
         
-    def scanForNetworks(interfaceName, frequency=0, printResults=False):
-        
-        if frequency == 0:
-            result = subprocess.run(['iw', 'dev', interfaceName, 'scan'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-        else:
-            result = subprocess.run(['iw', 'dev', interfaceName, 'scan', 'freq', str(frequency)], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    @staticmethod
+    def ensureInterfaceUp(interfaceName):
+        """Attempts to bring interface UP if currently down."""
+        try:
+            operstate_path = f"/sys/class/net/{interfaceName}/operstate"
+            if os.path.exists(operstate_path):
+                with open(operstate_path, "r") as f:
+                    state = f.read().strip().lower()
+                if state == "down":
+                    subprocess.run(['ip', 'link', 'set', interfaceName, 'up'],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
 
-        retCode = result.returncode
-        errString = ""
-        wirelessResult = result.stdout.decode('UTF-8')
-        
-        # debug
-        if (printResults):
-            print('Return Code ' + str(retCode))
-            print(wirelessResult)
-        
-        wirelessNetworks = {}
-        
-        if (retCode == 0):
-            wirelessNetworks = WirelessEngine.parseIWoutput(wirelessResult)
+    @staticmethod
+    def getInterfaceMode(interfaceName):
+        """Returns 'monitor', 'managed', or 'unknown' for the interface."""
+        try:
+            res = subprocess.run(['iw', 'dev', interfaceName, 'info'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
+            if res.returncode == 0:
+                for line in res.stdout.decode('utf-8', errors='ignore').splitlines():
+                    line_s = line.strip()
+                    if line_s.startswith('type monitor'):
+                        return 'monitor'
+                    elif line_s.startswith('type managed'):
+                        return 'managed'
+        except Exception:
+            pass
+
+        try:
+            res = subprocess.run(['iwconfig', interfaceName],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
+            if res.returncode == 0:
+                out = res.stdout.decode('utf-8', errors='ignore')
+                if 'Mode:Monitor' in out:
+                    return 'monitor'
+                elif 'Mode:Managed' in out:
+                    return 'managed'
+        except Exception:
+            pass
+
+        try:
+            type_file = f"/sys/class/net/{interfaceName}/type"
+            if os.path.exists(type_file):
+                with open(type_file, 'r') as f:
+                    val = f.read().strip()
+                    if val in ('801', '802', '803'):
+                        return 'monitor'
+                    elif val == '1':
+                        return 'managed'
+        except Exception:
+            pass
+
+        return 'unknown'
+
+    @staticmethod
+    def isMonitorMode(interfaceName):
+        """Checks if interface is in monitor mode."""
+        return WirelessEngine.getInterfaceMode(interfaceName) == 'monitor'
+
+    @staticmethod
+    def getInterfaceDriver(interfaceName):
+        """Returns the kernel driver module name for the given network interface."""
+        try:
+            driver_path = f"/sys/class/net/{interfaceName}/device/driver"
+            if os.path.islink(driver_path):
+                return os.path.basename(os.readlink(driver_path))
+        except OSError:
+            pass
+        return ""
+
+    @staticmethod
+    def setInterfaceMode(interfaceName, targetMode):
+        """Switches interface between 'monitor' and 'managed' mode.
+        Supports both direct in-place switching and driver-aware VIF switching
+        (e.g., creating wlan0mon for iwlwifi, which silently drops frames in direct monitor mode).
+        Returns (success: bool, message: str).
+        """
+        if targetMode not in ('monitor', 'managed'):
+            return False, f"Unsupported mode: {targetMode}"
+
+        current = WirelessEngine.getInterfaceMode(interfaceName)
+        if current == targetMode:
+            return True, f"Interface {interfaceName} is already in {targetMode} mode."
+
+        driver = WirelessEngine.getInterfaceDriver(interfaceName)
+
+        def _run_cmd(cmd):
+            # Try direct execution
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=6)
+            if r.returncode == 0:
+                return True, ""
+            # Try passwordless sudo
+            r = subprocess.run(['sudo', '-n'] + cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=6)
+            if r.returncode == 0:
+                return True, ""
+            # Try pkexec if desktop GUI session
+            if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
+                r = subprocess.run(['pkexec'] + cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+                if r.returncode == 0:
+                    return True, ""
+            err = r.stderr.decode('utf-8', errors='ignore').strip()
+            return False, err
+
+        def _get_phy(iface):
+            try:
+                out = subprocess.run(['iw', 'dev', iface, 'info'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode('utf-8')
+                for line in out.splitlines():
+                    if 'wiphy' in line:
+                        return f"phy{line.strip().split()[-1]}"
+            except Exception:
+                pass
+            return None
+
+        if targetMode == 'monitor':
+            _run_cmd(['nmcli', 'dev', 'set', interfaceName, 'managed', 'no'])
+
+            # Driver-aware VIF method for iwlwifi (Intel AX201, etc.)
+            if driver == 'iwlwifi':
+                mon_iface = f"{interfaceName}mon"
+                phy = _get_phy(interfaceName) or "phy1"
+                _run_cmd(['iw', 'dev', mon_iface, 'del'])
+                _run_cmd(['ip', 'link', 'set', interfaceName, 'down'])
+                _run_cmd(['iw', 'dev', interfaceName, 'del'])
+                ok, err = _run_cmd(['iw', phy, 'interface', 'add', mon_iface, 'type', 'monitor'])
+                if not ok:
+                    return False, f"Failed to add monitor VIF {mon_iface}: {err}"
+                _run_cmd(['ip', 'link', 'set', mon_iface, 'up'])
+                _run_cmd(['iw', 'dev', mon_iface, 'set', 'channel', '1'])
+                return True, f"Monitor interface {mon_iface} created successfully."
+
+            # Standard in-place switch for other adapters
+            _run_cmd(['ip', 'link', 'set', interfaceName, 'down'])
+            ok, err = _run_cmd(['iw', 'dev', interfaceName, 'set', 'type', 'monitor'])
+            if not ok:
+                return False, f"Failed to set type monitor on {interfaceName}: {err}"
+            _run_cmd(['ip', 'link', 'set', interfaceName, 'up'])
+            _run_cmd(['iw', 'dev', interfaceName, 'set', 'channel', '1'])
+            return True, f"Switched {interfaceName} to monitor mode."
+
+        else:  # targetMode == 'managed'
+            if interfaceName.endswith('mon'):
+                base_iface = interfaceName[:-3]
+                phy = _get_phy(interfaceName) or "phy1"
+                _run_cmd(['iw', 'dev', interfaceName, 'del'])
+                if not os.path.exists(f"/sys/class/net/{base_iface}"):
+                    _run_cmd(['iw', phy, 'interface', 'add', base_iface, 'type', 'managed'])
+                _run_cmd(['ip', 'link', 'set', base_iface, 'up'])
+                _run_cmd(['nmcli', 'dev', 'set', base_iface, 'managed', 'yes'])
+                return True, f"Restored {base_iface} to managed mode."
+
+            # Standard in-place restore
+            _run_cmd(['ip', 'link', 'set', interfaceName, 'down'])
+            ok, err = _run_cmd(['iw', 'dev', interfaceName, 'set', 'type', 'managed'])
+            if not ok:
+                return False, f"Failed to set type managed on {interfaceName}: {err}"
+            _run_cmd(['ip', 'link', 'set', interfaceName, 'up'])
+            _run_cmd(['nmcli', 'dev', 'set', interfaceName, 'managed', 'yes'])
+            return True, f"Restored {interfaceName} to managed mode."
+
+
+    @staticmethod
+    def parseNmcliOutput(nmcliOutput, filterFrequency=0):
+        """Parse nmcli dev wifi list terse output into WirelessNetwork dict."""
+        retVal = {}
+        now = datetime.datetime.now()
+        for line in nmcliOutput.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = re.split(r'(?<!\\):', line)
+            if len(parts) >= 8:
+                bssid = parts[1].replace(r'\:', ':').strip()
+                if not bssid or bssid == '--':
+                    continue
+                ssid = parts[2].replace(r'\:', ':').strip()
+                mode = parts[3].replace(r'\:', ':').strip()
+                chan_str = parts[4].replace(r'\:', ':').strip()
+                freq_str = parts[5].replace(r'\:', ':').strip()
+                sig_str = parts[7].replace(r'\:', ':').strip()
+                sec_str = parts[8].replace(r'\:', ':').strip() if len(parts) > 8 else ""
+
+                curNet = WirelessNetwork()
+                curNet.macAddr = bssid
+                curNet.ssid = WirelessEngine.convertUnknownToString(ssid) if ssid else "<Hidden>"
+                curNet.mode = "AP" if "Infra" in mode else (mode if mode else "AP")
+                try:
+                    curNet.channel = int(chan_str)
+                except ValueError:
+                    curNet.channel = 0
+
+                freq_clean = re.sub(r'[^0-9]', '', freq_str)
+                try:
+                    curNet.frequency = int(freq_clean)
+                except ValueError:
+                    if str(curNet.channel) in channelToFreq:
+                        curNet.frequency = int(channelToFreq[str(curNet.channel)])
+
+                if filterFrequency > 0 and curNet.frequency > 0 and curNet.frequency != filterFrequency:
+                    continue
+
+                try:
+                    sig_pct = int(sig_str)
+                    curNet.signal = int(sig_pct / 2) - 100
+                except ValueError:
+                    curNet.signal = -100
+                curNet.strongestsignal = curNet.signal
+
+                sec_clean = sec_str.replace(r'\:', ':').strip()
+                curNet.security = sec_clean if sec_clean else "Open"
+                curNet.privacy = sec_clean if sec_clean else ""
+                curNet.firstSeen = now
+                curNet.lastSeen = now
+
+                if curNet.channel > 0 or curNet.frequency > 0:
+                    retVal[curNet.getKey()] = curNet
+
+        return retVal
+
+    @staticmethod
+    def scanViaNmcli(interfaceName=None, frequency=0):
+        """Perform non-root WiFi scan using nmcli."""
+        try:
+            if interfaceName:
+                subprocess.run(['nmcli', 'dev', 'wifi', 'rescan', 'ifname', interfaceName],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            else:
+                subprocess.run(['nmcli', 'dev', 'wifi', 'rescan'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+
+        try:
+            cmd = ['nmcli', '--terse', '--fields', 'IN-USE,BSSID,SSID,MODE,CHAN,FREQ,RATE,SIGNAL,SECURITY', 'dev', 'wifi', 'list']
+            if interfaceName:
+                cmd += ['ifname', interfaceName]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            if res.returncode == 0:
+                output = res.stdout.decode('utf-8', errors='ignore')
+                return WirelessEngine.parseNmcliOutput(output, frequency)
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def scanMonitorNetworks(interfaceName, frequency=0, printResults=False):
+        """Passive monitor-mode frame sniffer capturing 802.11 beacons and probe responses with channel hopping."""
+        if frequency > 0:
+            if str(frequency) in freqToChannel:
+                channels = [int(freqToChannel[str(frequency)])]
+            else:
+                channels = [int(frequency)]
+            dwell = 0.8
         else:
-            # errCodes:
-            # 156 = Network is down (i.e. switch may be turned off)
-            # 240  = command failed: Device or resource busy (-16)
-            errString = wirelessResult.replace("\n", "")
-            if (retCode == WirelessNetwork.ERR_NETDOWN):
-                errString = 'Interface appears down'
-            elif (retCode == WirelessNetwork.ERR_DEVICEBUSY):
-                errString = 'Device is busy'
-            elif (retCode == WirelessNetwork.ERR_OPNOTPERMITTED):
-                errString = errString + '. Did you run as root?'
-            
-        return retCode, errString, wirelessNetworks
+            channels = list(range(1, 14))
+            dwell = 0.25
+
+        allNetworks = {}
+        now = datetime.datetime.now()
+
+        for ch in channels:
+            freq = int(channelToFreq.get(str(ch), 2412))
+
+            # Set channel on the interface using iw / sudo -n iw
+            try:
+                subprocess.run(['iw', 'dev', interfaceName, 'set', 'channel', str(ch)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            except Exception:
+                pass
+            try:
+                subprocess.run(['sudo', '-n', 'iw', 'dev', interfaceName, 'set', 'channel', str(ch)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            except Exception:
+                pass
+
+            # Primary capture: tcpdump with line-buffering (-l) and timeout
+            captured_lines = []
+            tcpdump_cmd = ['timeout', str(dwell), 'tcpdump', '-l', '-i', interfaceName, '-c', '30',
+                           '-nn', '-e', '-s', '256', 'type mgt subtype beacon or type mgt subtype probe-resp']
+            try:
+                res = subprocess.run(tcpdump_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                if res.stdout:
+                    captured_lines = res.stdout.decode('utf-8', errors='ignore').splitlines()
+            except Exception:
+                pass
+
+            if not captured_lines:
+                try:
+                    res = subprocess.run(['sudo', '-n'] + tcpdump_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    if res.stdout:
+                        captured_lines = res.stdout.decode('utf-8', errors='ignore').splitlines()
+                except Exception:
+                    pass
+
+            if captured_lines:
+                for line in captured_lines:
+                    bssid_m = re.search(r'(?:BSSID:|SA:)\s*([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})', line)
+                    if not bssid_m:
+                        continue
+                    bssid = bssid_m.group(1).upper()
+
+                    ssid_m = re.search(r'(?:Beacon|Probe Response)\s*\((.*?)\)', line)
+                    ssid = ssid_m.group(1) if ssid_m else "<Hidden>"
+
+                    sig_m = re.search(r'(-?[0-9]+)dBm\s+signal', line)
+                    sig = int(sig_m.group(1)) if sig_m else -75
+
+                    ch_m = re.search(r'CH:\s*([0-9]+)', line)
+                    channel = int(ch_m.group(1)) if ch_m else ch
+
+                    is_beacon = 'Beacon' in line
+                    key = bssid + ssid + str(channel)
+
+                    if key in allNetworks:
+                        curNet = allNetworks[key]
+                        if is_beacon:
+                            curNet.beaconCount += 1
+                        curNet.lastSeen = now
+                        if sig > -100:
+                            curNet.signal = sig
+                            if curNet.signal > curNet.strongestsignal:
+                                curNet.strongestsignal = curNet.signal
+                        if ssid != "<Hidden>" and curNet.ssid == "<Hidden>":
+                            curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
+                    else:
+                        curNet = WirelessNetwork()
+                        curNet.macAddr = bssid
+                        curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
+                        curNet.mode = "AP"
+                        curNet.channel = channel
+                        curNet.frequency = freq
+                        curNet.signal = sig
+                        curNet.strongestsignal = sig
+                        curNet.security = "WPA2/WPA3" if ("WPA" in line or "RSN" in line or "PRIVACY" in line) else "Open"
+                        curNet.privacy = curNet.security
+                        curNet.beaconCount = 1 if is_beacon else 0
+                        curNet.firstSeen = now
+                        curNet.lastSeen = now
+                        allNetworks[key] = curNet
+
+            # Secondary fallback: tshark with valid fields and hex SSID decoding
+            elif shutil.which('tshark'):
+                try:
+                    cmd = [
+                        'timeout', '1.0', 'tshark', '-l', '-i', interfaceName,
+                        '-c', '30',
+                        '-Y', 'wlan.fc.type_subtype == 8 || wlan.fc.type_subtype == 5',
+                        '-T', 'fields',
+                        '-e', 'wlan.bssid',
+                        '-e', 'wlan.ssid',
+                        '-e', 'radiotap.dbm_antsignal',
+                        '-e', 'wlan_radio.channel',
+                        '-e', 'wlan.fc.type_subtype',
+                        '-e', 'wlan.rsn.version',
+                        '-e', 'wlan.fixed.capabilities.privacy'
+                    ]
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    if res.stdout:
+                        for line in res.stdout.decode('utf-8', errors='ignore').splitlines():
+                            parts = line.split('\t')
+                            if len(parts) < 4:
+                                continue
+                            raw_bssid = parts[0].strip()
+                            if not raw_bssid or len(raw_bssid.split(':')) != 6:
+                                continue
+                            bssid = raw_bssid.upper()
+
+                            raw_ssid = parts[1].strip() if len(parts) > 1 else ""
+                            ssid = raw_ssid
+                            if raw_ssid:
+                                try:
+                                    decoded = bytes.fromhex(raw_ssid).decode('utf-8', errors='ignore')
+                                    if decoded and any(c.isalnum() for c in decoded):
+                                        ssid = decoded
+                                except Exception:
+                                    pass
+                            if not ssid:
+                                ssid = "<Hidden>"
+
+                            sig = -75
+                            if len(parts) > 2 and parts[2].strip():
+                                try:
+                                    sig = int(parts[2].split(',')[0].strip())
+                                except Exception:
+                                    sig = -75
+
+                            channel = ch
+                            if len(parts) > 3 and parts[3].strip():
+                                try:
+                                    channel = int(parts[3].split(',')[0].strip())
+                                except Exception:
+                                    channel = ch
+
+                            subtype = 8
+                            if len(parts) > 4 and parts[4].strip():
+                                try:
+                                    val = parts[4].split(',')[0].strip()
+                                    subtype = int(val, 0)
+                                except Exception:
+                                    subtype = 8
+
+                            is_beacon = (subtype == 8)
+                            key = bssid + ssid + str(channel)
+
+                            if key in allNetworks:
+                                curNet = allNetworks[key]
+                                if is_beacon:
+                                    curNet.beaconCount += 1
+                                curNet.lastSeen = now
+                                if sig > -100:
+                                    curNet.signal = sig
+                                    if curNet.signal > curNet.strongestsignal:
+                                        curNet.strongestsignal = curNet.signal
+                                if ssid != "<Hidden>" and curNet.ssid == "<Hidden>":
+                                    curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
+                            else:
+                                curNet = WirelessNetwork()
+                                curNet.macAddr = bssid
+                                curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
+                                curNet.mode = "AP"
+                                curNet.channel = channel
+                                curNet.frequency = freq
+                                curNet.signal = sig
+                                curNet.strongestsignal = sig
+                                curNet.security = "WPA2/WPA3" if len(parts) > 5 and parts[5].strip() else "Open"
+                                curNet.privacy = curNet.security
+                                curNet.beaconCount = 1 if is_beacon else 0
+                                curNet.firstSeen = now
+                                curNet.lastSeen = now
+                                allNetworks[key] = curNet
+                except Exception:
+                    pass
+
+        return 0, "", allNetworks
+
+    def scanForNetworks(interfaceName, frequency=0, printResults=False):
+        WirelessEngine.ensureInterfaceUp(interfaceName)
+
+        # 1. Monitor mode interface
+        if WirelessEngine.isMonitorMode(interfaceName):
+            return WirelessEngine.scanMonitorNetworks(interfaceName, frequency, printResults)
+
+        # 2. Managed mode scan via iw
+        retCode = -1
+        wirelessResult = ""
+        try:
+            if frequency == 0:
+                result = subprocess.run(['iw', 'dev', interfaceName, 'scan'],
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8)
+            else:
+                result = subprocess.run(['iw', 'dev', interfaceName, 'scan', 'freq', str(frequency)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8)
+
+            retCode = result.returncode
+            wirelessResult = result.stdout.decode('UTF-8', errors='ignore')
+        except Exception:
+            retCode = -1
+
+        if retCode == 0:
+            wirelessNetworks = WirelessEngine.parseIWoutput(wirelessResult)
+            return 0, "", wirelessNetworks
+
+        # 3. Resilient fallback to nmcli if unprivileged or interface busy
+        nmcli_nets = WirelessEngine.scanViaNmcli(interfaceName, frequency)
+        if nmcli_nets and len(nmcli_nets) > 0:
+            return 0, "", nmcli_nets
+
+        errString = wirelessResult.replace("\n", " ").strip()
+        if retCode == WirelessNetwork.ERR_NETDOWN:
+            errString = f"Interface {interfaceName} appears down"
+        elif retCode == WirelessNetwork.ERR_DEVICEBUSY:
+            errString = f"Interface {interfaceName} is busy"
+        elif retCode == WirelessNetwork.ERR_OPNOTPERMITTED:
+            errString = f"Root privileges required for iw scan on {interfaceName}."
+
+        return retCode, errString, {}
         
     def getFieldValue(p, curLine):
         matchobj = p.search(curLine)
