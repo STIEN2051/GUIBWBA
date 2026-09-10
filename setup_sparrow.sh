@@ -52,30 +52,40 @@ echo "[+] Packet capture capabilities configured."
 
 echo "[*] Step 4: Configuring Wi-Fi hardware for MONITOR mode..."
 
-# Priority 1: Intel AX201 (wlan0 -> wlan0mon) via high-performance VIF method
-if iw dev | grep -q "wlan0"; then
-    echo "[*] Configuring wlan0 (Intel AX201) via high-performance VIF monitor method..."
-    sudo nmcli device set wlan0 managed no 2>/dev/null || true
-    sudo ip link set wlan0 down 2>/dev/null || true
-    sudo iw dev wlan0 del 2>/dev/null || true
-    sudo iw dev wlan0mon del 2>/dev/null || true
-    sudo iw phy phy1 interface add wlan0mon type monitor
-    sudo ip link set wlan0mon up
-    sudo iw dev wlan0mon set channel 1
-    echo "[+] wlan0mon is active in MONITOR mode (capturing 10+ beacons/sec)!"
-elif iw dev | grep -q "wlan0mon"; then
-    echo "[+] wlan0mon is already active in MONITOR mode!"
+# Detect active default route interface to preserve internet connectivity
+ACTIVE_IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)
+if [ -n "$ACTIVE_IFACE" ]; then
+    echo "[!] Active internet connection is on: $ACTIVE_IFACE (will NOT be altered)"
 fi
 
-# Priority 2: wlan1 (Realtek adapter)
-if iw dev | grep -q "wlan1"; then
-    echo "[*] Configuring wlan1 (Realtek adapter) in monitor mode..."
-    sudo nmcli device set wlan1 managed no 2>/dev/null || true
-    sudo ip link set wlan1 down 2>/dev/null || true
-    sudo iw dev wlan1 set type monitor 2>/dev/null || true
-    sudo ip link set wlan1 up 2>/dev/null || true
-    sudo iw dev wlan1 set channel 1 2>/dev/null || true
-    echo "[+] wlan1 is configured in monitor mode."
+# Priority 1: Intel AX201 (wlan0 -> wlan0mon) via high-performance VIF method
+if [ "$ACTIVE_IFACE" != "wlan0" ]; then
+    if iw dev | grep -q "wlan0"; then
+        echo "[*] Configuring wlan0 (Intel AX201) via high-performance VIF monitor method..."
+        sudo nmcli device set wlan0 managed no 2>/dev/null || true
+        sudo ip link set wlan0 down 2>/dev/null || true
+        sudo iw dev wlan0 del 2>/dev/null || true
+        sudo iw dev wlan0mon del 2>/dev/null || true
+        sudo iw phy phy1 interface add wlan0mon type monitor
+        sudo ip link set wlan0mon up
+        sudo iw dev wlan0mon set channel 1
+        echo "[+] wlan0mon is active in MONITOR mode (capturing 10+ beacons/sec)!"
+    elif iw dev | grep -q "wlan0mon"; then
+        echo "[+] wlan0mon is already active in MONITOR mode!"
+    fi
+fi
+
+# Priority 2: wlan1 (Realtek adapter) - only if not active internet interface
+if [ "$ACTIVE_IFACE" != "wlan1" ]; then
+    if iw dev | grep -q "wlan1"; then
+        echo "[*] Configuring wlan1 (Realtek adapter) in monitor mode..."
+        sudo nmcli device set wlan1 managed no 2>/dev/null || true
+        sudo ip link set wlan1 down 2>/dev/null || true
+        sudo iw dev wlan1 set type monitor 2>/dev/null || true
+        sudo ip link set wlan1 up 2>/dev/null || true
+        sudo iw dev wlan1 set channel 1 2>/dev/null || true
+        echo "[+] wlan1 is configured in monitor mode."
+    fi
 fi
 
 echo "=============================================================================="

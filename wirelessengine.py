@@ -475,7 +475,7 @@ class WirelessNetwork(object):
         return retVal
         
     def getKey(self):
-        return self.macAddr + self.ssid+str(self.channel)
+        return (self.macAddr or "").upper() + (self.ssid or "") + str(self.channel)
         
 # Module-level compiled regex patterns for parseIWoutput() — compiled once, not per-call
 _P_BSS = re.compile(r'^BSS (.*?)\(')
@@ -916,7 +916,7 @@ class WirelessEngine(object):
                 sec_str = parts[8].replace(r'\:', ':').strip() if len(parts) > 8 else ""
 
                 curNet = WirelessNetwork()
-                curNet.macAddr = bssid
+                curNet.macAddr = bssid.upper()
                 curNet.ssid = WirelessEngine.convertUnknownToString(ssid) if ssid else "<Hidden>"
                 curNet.mode = "AP" if "Infra" in mode else (mode if mode else "AP")
                 try:
@@ -1059,7 +1059,7 @@ class WirelessEngine(object):
                             curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
                     else:
                         curNet = WirelessNetwork()
-                        curNet.macAddr = bssid
+                        curNet.macAddr = bssid.upper()
                         curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
                         curNet.mode = "AP"
                         curNet.channel = channel
@@ -1150,7 +1150,7 @@ class WirelessEngine(object):
                                     curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
                             else:
                                 curNet = WirelessNetwork()
-                                curNet.macAddr = bssid
+                                curNet.macAddr = bssid.upper()
                                 curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
                                 curNet.mode = "AP"
                                 curNet.channel = channel
@@ -1270,7 +1270,7 @@ class WirelessEngine(object):
                 curNetwork = WirelessNetwork()
                 curNetwork.lastSeen = now
                 curNetwork.firstSeen = now
-                curNetwork.macAddr = fieldValue
+                curNetwork.macAddr = fieldValue.upper()
                 continue
             
             if curNetwork is None:
