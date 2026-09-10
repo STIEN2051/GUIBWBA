@@ -32,8 +32,8 @@ import math # sqrt
 import sqlite3
 import uuid
 
-from sparrowcommon import BaseThreadClass, stringtobool
-from sparrowgps import SparrowGPS
+from common import BaseThreadClass, stringtobool
+from gpsengine import GPSData
 
 # ------------------ Global Functions --------------------------------------
 def toHex(val):
@@ -63,9 +63,9 @@ class BluetoothDevice(object):
         self.firstSeen = datetime.datetime.now()
         self.lastSeen = datetime.datetime.now()
 
-        self.gps = SparrowGPS()
+        self.gps = GPSData()
         self.strongestRssi = self.rssi
-        self.strongestgps = SparrowGPS()
+        self.strongestgps = GPSData()
         
         self.foundInList = False
     
@@ -529,8 +529,8 @@ class specanThread(BaseThreadClass):
 _bhCache = {'time': 0.0, 'result': None}
 _BH_CACHE_TTL = 5.0  # seconds
 
-# ------------------  Sparrow Bluetooth Class ----------------------------------
-class SparrowBluetooth(object):
+# ------------------  Bluetooth Engine Class ----------------------------------
+class BluetoothEngine(object):
     SCANTYPE_BLUEHYDRA = 1
     SCANTYPE_ADVERTISEMENT = 2
     
@@ -548,7 +548,7 @@ class SparrowBluetooth(object):
         self.blueHydraProc = None
         self.btmonThread = None
         self.devices = {}
-        self.scanType = SparrowBluetooth.SCANTYPE_BLUEHYDRA
+        self.scanType = BluetoothEngine.SCANTYPE_BLUEHYDRA
         
         self.beaconActive = False
         
@@ -556,14 +556,14 @@ class SparrowBluetooth(object):
         self.hasUbertooth = False
         self.hasBlueHydra = False
 
-        numBtAdapters = len(SparrowBluetooth.getBluetoothInterfaces())
+        numBtAdapters = len(BluetoothEngine.getBluetoothInterfaces())
         if numBtAdapters > 0:
             self.hasBluetooth = True
         
-        if SparrowBluetooth.getNumUbertoothDevices() > 0:
-            #SparrowBluetooth.ubertoothStopSpecan()
-            errcode, errmsg = SparrowBluetooth.hasUbertoothTools()
-            # errcode, errmsg = SparrowBluetooth.ubertoothOnline()
+        if BluetoothEngine.getNumUbertoothDevices() > 0:
+            #BluetoothEngine.ubertoothStopSpecan()
+            errcode, errmsg = BluetoothEngine.hasUbertoothTools()
+            # errcode, errmsg = BluetoothEngine.ubertoothOnline()
             if errcode == 0:
                 self.hasUbertooth = True
                 
@@ -670,7 +670,7 @@ class SparrowBluetooth(object):
                 
             self.blueHydraProc = None
             
-            SparrowBluetooth.resetUbertooth()
+            BluetoothEngine.resetUbertooth()
         
         if self.btmonThread and self.btmonThread.threadRunning:
             self.btmonThread.stopAndWait()
@@ -684,16 +684,16 @@ class SparrowBluetooth(object):
     def updateDeviceList(self):
         # Because GPS comes from further up the stack, we maintain a local class list and have to
         # be sure to copy some fields like firstseen forward on updates
-        if self.scanType == SparrowBluetooth.SCANTYPE_BLUEHYDRA:
+        if self.scanType == BluetoothEngine.SCANTYPE_BLUEHYDRA:
             # Check if blue_hydra died mid-session and fall back if so
             if self.blueHydraProc and self.blueHydraProc.poll() is not None:
                 print('WARNING: blue_hydra stopped unexpectedly. Falling back to BLE advertisement scan.')
                 self.blueHydraProc = None
-                self.scanType = SparrowBluetooth.SCANTYPE_ADVERTISEMENT
+                self.scanType = BluetoothEngine.SCANTYPE_ADVERTISEMENT
                 self.btmonThread = BtmonThread(self)
                 self.btmonThread.start()
 
-            errcode, retList = SparrowBluetooth.getBlueHydraBluetoothDevices()
+            errcode, retList = BluetoothEngine.getBlueHydraBluetoothDevices()
             
             if errcode == 0:
                 self.deviceLock.acquire()
@@ -752,10 +752,10 @@ class SparrowBluetooth(object):
                     # Already running
                     return
                     
-            self.scanType = SparrowBluetooth.SCANTYPE_BLUEHYDRA
+            self.scanType = BluetoothEngine.SCANTYPE_BLUEHYDRA
             # Clear the sqlite table and invalidate the result cache so the
             # first timer tick reads fresh data instead of the stale empty list
-            SparrowBluetooth.blueHydraClearDevices()
+            BluetoothEngine.blueHydraClearDevices()
             _bhCache['time'] = 0.0
             _bhCache['result'] = None
 
@@ -768,7 +768,7 @@ class SparrowBluetooth(object):
             if self.blueHydraProc.poll() is not None:
                 print('WARNING: blue_hydra exited immediately after launch. Falling back to BLE advertisement scan.')
                 self.blueHydraProc = None
-                self.scanType = SparrowBluetooth.SCANTYPE_ADVERTISEMENT
+                self.scanType = BluetoothEngine.SCANTYPE_ADVERTISEMENT
                 self.btmonThread = BtmonThread(self)
                 self.btmonThread.start()
                 return
@@ -787,7 +787,7 @@ class SparrowBluetooth(object):
                 self.blueHydraProc = None
                 
                 
-            self.scanType = SparrowBluetooth.SCANTYPE_ADVERTISEMENT
+            self.scanType = BluetoothEngine.SCANTYPE_ADVERTISEMENT
             self.btmonThread = BtmonThread(self)
             self.btmonThread.start()
             
@@ -911,7 +911,7 @@ class SparrowBluetooth(object):
         
         for curKey in self.spectrum.keys():
             # curKey is frequency
-            channel = SparrowBluetooth.fFreqToChannel(curKey)
+            channel = BluetoothEngine.fFreqToChannel(curKey)
             rssi = self.spectrum[curKey]
             if rssi > -10.0:
                 rssi = -10.0
@@ -967,7 +967,7 @@ class SparrowBluetooth(object):
         if self.spectrumScanThread:
             self.spectrumScanThread.stopAndWait()
             self.spectrumScanThread = None
-            SparrowBluetooth.resetUbertooth()
+            BluetoothEngine.resetUbertooth()
             
     def resetUbertooth():
         result = subprocess.run(['ubertooth-util', '-r'], stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
@@ -1054,7 +1054,7 @@ class SparrowBluetooth(object):
             return False
         
     def ubertoothStopSpecan():
-        procList = SparrowBluetooth.getUbertoothSpecanProcesses()
+        procList = BluetoothEngine.getUbertoothSpecanProcesses()
         
         for curProc in procList:
             try:
@@ -1063,10 +1063,10 @@ class SparrowBluetooth(object):
                 pass
 
     def hasBluetoothHardware():
-        if SparrowBluetooth.getNumUbertoothDevices() == 0:
+        if BluetoothEngine.getNumUbertoothDevices() == 0:
             return False
             
-        numBtAdapters = SparrowBluetooth.getBluetoothInterfaces()
+        numBtAdapters = BluetoothEngine.getBluetoothInterfaces()
         
         if len(numBtAdapters) == 0:
             return False
@@ -1084,7 +1084,7 @@ class SparrowBluetooth(object):
         if  not os.path.isfile('/usr/local/bin/ubertooth-specan') and not os.path.isfile('/usr/bin/ubertooth-specan'):
             return -1, 'ubertooth tools not found.'
                 
-        if SparrowBluetooth.ubertoothSpecanRunning():
+        if BluetoothEngine.ubertoothSpecanRunning():
             return -2, 'Ubertooth-specan is running.  Please stop it before continuing.'
             
         # aircrack-ng -a2 -b D8:EB:97:2F:DD:CE -w /opt/wordlists/TopPasswords3-2.txt falconcap-01.cap
@@ -1118,9 +1118,9 @@ def testSpectrum():
         print('Done')
     
 if __name__ == '__main__':
-    errcode, devices=SparrowBluetooth.getBlueHydraBluetoothDevices()
+    errcode, devices=BluetoothEngine.getBlueHydraBluetoothDevices()
     
-    btInterfaces = SparrowBluetooth.getBluetoothInterfaces()
+    btInterfaces = BluetoothEngine.getBluetoothInterfaces()
     
     if len(btInterfaces) > 0:
         print('Bluetooth (hci) interfaces:')
@@ -1128,18 +1128,18 @@ if __name__ == '__main__':
         for curInterface in btInterfaces:
             print(curInterface)
         
-    errcode, errmsg = SparrowBluetooth.ubertoothOnline()
+    errcode, errmsg = BluetoothEngine.ubertoothOnline()
     
     if errcode == 0:
         print('Ubertooth tools found and device is online')
     else:
         print('Error: ' + errmsg)
-        specanProcesses = SparrowBluetooth.getUbertoothSpecanProcesses()
+        specanProcesses = BluetoothEngine.getUbertoothSpecanProcesses()
         
         for curProc in specanProcesses:
             print(curProc)
             
-    bt=SparrowBluetooth()
+    bt=BluetoothEngine()
 
     print(bt)
 

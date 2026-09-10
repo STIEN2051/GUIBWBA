@@ -52,7 +52,7 @@ class GPSThread(Thread):
         
         while (not self.signalStop):
             try:
-                gpsResult = SparrowGPS()
+                gpsResult = GPSData()
                 
                 try:
                     if (type(self.agps_thread.data_stream.alt) != str):
@@ -91,7 +91,7 @@ class GPSThread(Thread):
         self.threadRunning = False
 
 
-class SparrowGPS(object):
+class GPSData(object):
     def __init__(self):
         super().__init__()
         
@@ -114,7 +114,7 @@ class SparrowGPS(object):
 
     def __eq__(self, obj):
         # This is equivance....   ==
-        if not isinstance(obj, SparrowGPS):
+        if not isinstance(obj, GPSData):
            return False
           
         if self.isValid != obj.isValid:
@@ -152,8 +152,8 @@ class GPSStatus(object):
         self.altitude = 0.0
         self.speed = 0.0
         
-    def asSparrowGPSObject(self):
-        retVal = SparrowGPS()
+    def asGPSObject(self):
+        retVal = GPSData()
         retVal.isValid = self.isValid
         retVal.latitude = self.latitude
         retVal.latitude = self.longitude
@@ -244,7 +244,7 @@ class GPSEngineStatic(GPSEngine):
     def __init__(self, latitude, longitude, altitude):
         super().__init__()
         
-        self.lastCoord = SparrowGPS()
+        self.lastCoord = GPSData()
         
         self.lastCoord.latitude = latitude
         self.lastCoord.longitude = longitude

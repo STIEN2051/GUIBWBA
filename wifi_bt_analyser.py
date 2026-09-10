@@ -41,9 +41,9 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5 import QtCore
 
 from wirelessengine import WirelessEngine, WirelessNetwork, WirelessClient
-from sparrowcommon import BaseThreadClass, stringtobool
-from sparrowtablewidgets import IntTableWidgetItem, DateTableWidgetItem, FloatTableWidgetItem
-from sparrowbluetooth import SparrowBluetooth, BluetoothDevice
+from common import BaseThreadClass, stringtobool
+from tablewidgets import IntTableWidgetItem, DateTableWidgetItem, FloatTableWidgetItem
+from btengine import BluetoothEngine, BluetoothDevice
 
 hasOUILookup = False
 try:
@@ -186,15 +186,15 @@ class mainWindow(QMainWindow):
         self.hasUbertooth = False
 
         try:
-            numBtAdapters = len(SparrowBluetooth.getBluetoothInterfaces())
+            numBtAdapters = len(BluetoothEngine.getBluetoothInterfaces())
             if numBtAdapters > 0:
                 self.hasBluetooth = True
         except Exception:
             self.hasBluetooth = False
 
         try:
-            if SparrowBluetooth.getNumUbertoothDevices() > 0:
-                errcode, errmsg = SparrowBluetooth.hasUbertoothTools()
+            if BluetoothEngine.getNumUbertoothDevices() > 0:
+                errcode, errmsg = BluetoothEngine.hasUbertoothTools()
                 if errcode == 0:
                     self.hasUbertooth = True
         except Exception:
@@ -202,7 +202,7 @@ class mainWindow(QMainWindow):
 
         if self.hasBluetooth or self.hasUbertooth:
             try:
-                self.bluetooth = SparrowBluetooth()
+                self.bluetooth = BluetoothEngine()
             except Exception:
                 self.bluetooth = None
         else:
@@ -232,7 +232,7 @@ class mainWindow(QMainWindow):
         mainHeight = min(max(650, desktopSize.height() * 3 // 4), 1000)
         self.resize(mainWidth, mainHeight)
         self.center()
-        self.setWindowTitle('Sparrow - WiFi & Bluetooth Scanner')
+        self.setWindowTitle('GUI-Based WiFi and Bluetooth Analyser')
         if os.path.isfile('wifi_icon.png'):
             self.setWindowIcon(QIcon('wifi_icon.png'))
 
@@ -316,7 +316,7 @@ class mainWindow(QMainWindow):
         # Help Menu
         helpMenu = menubar.addMenu('&Help')
         aboutAct = QAction('&About', self)
-        aboutAct.setStatusTip('About Sparrow Scanner')
+        aboutAct.setStatusTip('About GUI-Based WiFi and Bluetooth Analyser')
         aboutAct.triggered.connect(self.onAbout)
         helpMenu.addAction(aboutAct)
 
@@ -479,6 +479,21 @@ class mainWindow(QMainWindow):
         self.lblClientsTitle.setStyleSheet("font-weight: bold; color: #a6e22e; padding: 2px;")
         clientHeaderLayout.addWidget(self.lblClientsTitle)
         clientHeaderLayout.addStretch()
+
+        lblSearch = QLabel("Filter / Search:", clientWidget)
+        lblSearch.setStyleSheet("color: #aaa; font-size: 11px; margin-right: 2px;")
+        clientHeaderLayout.addWidget(lblSearch)
+
+        self.txtClientSearch = QLineEdit(clientWidget)
+        self.txtClientSearch.setPlaceholderText("🔍 Search MAC / Vendor / SSID...")
+        self.txtClientSearch.setClearButtonEnabled(True)
+        self.txtClientSearch.setFixedWidth(240)
+        self.txtClientSearch.setStyleSheet(
+            "QLineEdit { background-color: #2b2b2b; color: #fff; border: 1px solid #555; border-radius: 3px; padding: 3px 8px; font-size: 11px; }"
+            "QLineEdit:focus { border: 1px solid #0080c0; }"
+        )
+        self.txtClientSearch.textChanged.connect(self.onClientSearchChanged)
+        clientHeaderLayout.addWidget(self.txtClientSearch)
 
         self.btnShowAllClients = QPushButton("Show All Devices", clientWidget)
         self.btnShowAllClients.setStyleSheet("background-color: #333; color: white; border-radius: 3px; padding: 3px 10px; font-size: 11px;")
@@ -885,17 +900,35 @@ class mainWindow(QMainWindow):
         self.clientTable.setRowCount(0)
         WirelessEngine.detectedClients.clear()
 
+    def onClientSearchChanged(self, text):
+        self.filterClientTableRows()
+
     def filterClientTableRows(self, targetApMac=None):
         if targetApMac is not None:
             self.selectedApMac = targetApMac.strip().upper() if targetApMac else None
+
+        searchQuery = ""
+        if hasattr(self, 'txtClientSearch'):
+            searchQuery = self.txtClientSearch.text().strip().lower()
+
         numRows = self.clientTable.rowCount()
         for r in range(numRows):
-            if not self.selectedApMac:
-                self.clientTable.setRowHidden(r, False)
-            else:
+            apMatch = True
+            if self.selectedApMac:
                 apItem = self.clientTable.item(r, 2)
                 apMac = apItem.text().strip().upper() if apItem else ""
-                self.clientTable.setRowHidden(r, apMac != self.selectedApMac)
+                apMatch = (apMac == self.selectedApMac)
+
+            searchMatch = True
+            if searchQuery:
+                rowTexts = []
+                for c in range(self.clientTable.columnCount()):
+                    item = self.clientTable.item(r, c)
+                    if item and item.text():
+                        rowTexts.append(item.text().lower())
+                searchMatch = any(searchQuery in t for t in rowTexts)
+
+            self.clientTable.setRowHidden(r, not (apMatch and searchMatch))
 
     def onClientTableHeadingClicked(self, logicalIndex):
         if self.clientTableSortIndex == logicalIndex:
@@ -1081,7 +1114,7 @@ class mainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Monitor Mode Setup",
-                f"{msg}\n\nTip: You can also configure monitor mode via terminal using:\n  sudo ./setup_sparrow.sh",
+                f"{msg}\n\nTip: You can also configure monitor mode via terminal using:\n  sudo ./setup.sh",
                 QMessageBox.Ok
             )
 
@@ -1481,13 +1514,12 @@ class mainWindow(QMainWindow):
 
     def onAbout(self):
         aboutMsg = (
-            "Sparrow - WiFi & Bluetooth Scanner\n"
-            "Originally written by ghostop14\n"
-            "https://github.com/ghostop14\n\n"
+            "GUI-Based WiFi and Bluetooth Analyser\n"
+            "Simultaneous real-time multi-protocol wireless analyzer.\n\n"
             "Displays active WiFi and Bluetooth scans with\n"
-            "real-time device discovery, vendor identification, and export."
+            "real-time device discovery, 802.11 beacon monitoring, vendor identification, and export."
         )
-        QMessageBox.question(self, 'About Sparrow Scanner', aboutMsg, QMessageBox.Ok)
+        QMessageBox.question(self, 'About Analyser', aboutMsg, QMessageBox.Ok)
 
     def closeEvent(self, event):
         # Stop WiFi scan

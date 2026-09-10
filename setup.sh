@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Sparrow WiFi — Environment Setup & Hardware Configuration Script
+# GUI-Based WiFi and Bluetooth Analyser (GWBA) — Environment Setup & Hardware Configuration Script
 # ==============================================================================
 set -e
 
@@ -89,10 +89,10 @@ if [ "$ACTIVE_IFACE" != "wlan1" ]; then
 fi
 
 echo "=============================================================================="
-echo "[+] Setup complete! Run Sparrow with:"
-echo "    python3 sparrow-wifi.py"
+echo "[+] Setup complete! Run the Analyser with:"
+echo "    python3 wifi_bt_analyser.py"
 echo ""
-echo "[*] Select 'wlan0mon' in Sparrow WiFi and click Scan to capture live beacons!"
+echo "[*] Select 'wlan0mon' in GUI-Based WiFi and Bluetooth Analyser and click Scan to capture live beacons!"
 echo "[*] To restore normal managed Wi-Fi connections when finished, run:"
-echo "    ./setup_sparrow.sh --managed"
+echo "    ./setup.sh --managed"
 echo "=============================================================================="

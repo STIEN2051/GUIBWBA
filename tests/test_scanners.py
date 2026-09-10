@@ -7,7 +7,7 @@ import datetime
 import pytest
 
 from wirelessengine import WirelessEngine, WirelessNetwork, channelToFreq, freqToChannel
-from sparrowbluetooth import SparrowBluetooth, BluetoothDevice
+from btengine import BluetoothEngine, BluetoothDevice
 
 
 def test_channel_frequency_maps():
@@ -51,7 +51,7 @@ def test_wireless_engine_interface_detection():
 
 
 def test_bluetooth_initialization():
-    bt_interfaces = SparrowBluetooth.getBluetoothInterfaces()
+    bt_interfaces = BluetoothEngine.getBluetoothInterfaces()
     assert isinstance(bt_interfaces, list)
 
     dev = BluetoothDevice()
@@ -60,7 +60,7 @@ def test_bluetooth_initialization():
     dev.rssi = -65
     assert dev.macAddr == "AA:BB:CC:DD:EE:FF"
 
-    bt = SparrowBluetooth()
+    bt = BluetoothEngine()
     bt.startDiscovery()
     bt.updateDeviceList()
     assert isinstance(bt.devices, dict)
@@ -73,8 +73,8 @@ def test_gui_table_structure_offscreen():
     import importlib
 
     app = QApplication.instance() or QApplication(sys.argv)
-    sparrow_mod = importlib.import_module('sparrow-wifi')
-    win = sparrow_mod.mainWindow()
+    analyser_mod = importlib.import_module('wifi_bt_analyser')
+    win = analyser_mod.mainWindow()
 
     # Verify 14 columns
     assert win.networkTable.columnCount() == 14
@@ -145,8 +145,8 @@ def test_gui_client_table_offscreen():
     from wirelessengine import WirelessClient
 
     app = QApplication.instance() or QApplication(sys.argv)
-    sparrow_mod = importlib.import_module('sparrow-wifi')
-    win = sparrow_mod.mainWindow()
+    analyser_mod = importlib.import_module('wifi_bt_analyser')
+    win = analyser_mod.mainWindow()
 
     # Verify clientTable exists and has 8 columns
     assert hasattr(win, 'clientTable')

@@ -3,7 +3,7 @@
 test_monitor_mode.py — does this WiFi card actually do monitor mode?
 
 Standalone diagnostic. Mirrors the exact monitor-mode methodology used by
-sparrow-droneid's CaptureManager (driver-aware: VIF method for iwlwifi,
+CaptureManager (driver-aware: VIF method for iwlwifi,
 in-place 'iw set type monitor' otherwise), then proves it end-to-end:
 
   1. Enumerate WiFi interfaces and check phy monitor capability (iw phy).

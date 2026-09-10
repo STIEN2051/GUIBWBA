@@ -27,8 +27,8 @@ from dateutil import parser
 import json
 import copy
 from time import sleep
-from sparrowgps import SparrowGPS
-from sparrowcommon import stringtobool
+from gpsengine import GPSData
+from common import stringtobool
 
 # ------------------  Global channel to frequency definitions ------------------------------
 channelToFreq = {}
@@ -158,9 +158,9 @@ class WirelessClient(object):
         self.firstSeen = now
         self.lastSeen = now
 
-        self.gps = SparrowGPS()
+        self.gps = GPSData()
         self.strongestsignal = self.signal
-        self.strongestgps = SparrowGPS()
+        self.strongestgps = GPSData()
 
         self.probedSSIDs = []
         # Used for tracking in network table
@@ -318,9 +318,9 @@ class WirelessNetwork(object):
         self.firstSeen = now
         self.lastSeen = now
         self.beaconCount = 0
-        self.gps = SparrowGPS()
+        self.gps = GPSData()
         self.strongestsignal = self.signal
-        self.strongestgps = SparrowGPS()
+        self.strongestgps = GPSData()
         
         # Used for tracking in network table
         self.foundInList = False
@@ -724,7 +724,7 @@ class WirelessEngine(object):
             
         gpsdict = {}
         
-        gpsloc = SparrowGPS()
+        gpsloc = GPSData()
         if (gpsData is not None):
             gpsloc.copy(gpsData)
         
