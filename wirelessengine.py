@@ -150,8 +150,11 @@ class WirelessClient(object):
         self.apMacAddr = ""
         self.ssid = ""
         self.channel = 0
-        self.signal = -1000 # dBm
-        now=datetime.datetime.now()
+        self.signal = -100  # dBm
+        self.packetCount = 1
+        self.vendor = ""
+        self.ip = ""
+        now = datetime.datetime.now()
         self.firstSeen = now
         self.lastSeen = now
 
@@ -165,21 +168,20 @@ class WirelessClient(object):
         
     def __str__(self):
         retVal = ""
-        
         retVal += "MAC Address: " + self.macAddr + "\n"
         retVal += "Associated Access Point Mac Address: " + self.apMacAddr + "\n"
         retVal += "SSID: " + self.ssid + "\n"
         retVal += "Channel: " + str(self.channel) + "\n"
         retVal += "Signal: " + str(self.signal) + " dBm\n"
+        retVal += "Packets: " + str(self.packetCount) + "\n"
         retVal += "Strongest Signal: " + str(self.strongestsignal) + " dBm\n"
         retVal += "First Seen: " + str(self.firstSeen) + "\n"
         retVal += "Last Seen: " + str(self.lastSeen) + "\n"
         retVal += "Probed SSIDs:"
         
-        if (len(self.probedSSIDs) > 0):
+        if len(self.probedSSIDs) > 0:
             for curSSID in self.probedSSIDs:
                 retVal += " " + curSSID
-                
             retVal += "\n"
         else:
             retVal += " No probes observed\n"
@@ -195,28 +197,23 @@ class WirelessClient(object):
         return copy.deepcopy(self)
         
     def __eq__(self, obj):
-        # This is equivance....   ==
         if not isinstance(obj, WirelessClient):
-           return False
-          
+            return False
         if self.macAddr != obj.macAddr:
             return False
-            
         if self.apMacAddr != obj.apMacAddr:
             return False
-
         return True
 
     def __ne__(self, other):
-            return not self.__eq__(other)
+        return not self.__eq__(other)
         
     def getKey(self):
-        return self.macAddr
+        return (self.macAddr or "").upper()
         
     def associated(self):
         if len(self.apMacAddr) == 0 or (self.apMacAddr == "(not associated)"):
             return False
-            
         return True
         
     def createFromJsonDict(jsondict):
@@ -224,33 +221,44 @@ class WirelessClient(object):
         retVal.fromJsondict(jsondict)
         return retVal
         
+    @property
+    def bssid(self):
+        return self.apMacAddr
+
+    @bssid.setter
+    def bssid(self, value):
+        self.apMacAddr = value
+
     def fromJsondict(self, dictjson):
-        # Note: if the json dictionary isn't correct, this will naturally throw an exception that may
-        # need to be caught for error detection
-        self.macAddr = dictjson['macAddr']
-        self.apMacAddr = dictjson['apMacAddr']
-        self.ssid = dictjson['ssid']
-        self.channel = int(dictjson['channel'])
-        
-        self.signal = int(dictjson['signal'])
-        self.strongestsignal = int(dictjson['strongestsignal'])
+        self.macAddr = dictjson.get('macAddr', '')
+        self.apMacAddr = dictjson.get('apMacAddr', dictjson.get('bssid', ''))
+        self.ssid = dictjson.get('ssid', '')
+        self.channel = int(dictjson.get('channel', 0))
+        self.signal = int(dictjson.get('signal', -100))
+        self.strongestsignal = int(dictjson.get('strongestsignal', self.signal))
+        self.packetCount = int(dictjson.get('packetCount', 1))
+        self.vendor = dictjson.get('vendor', '')
+        self.ip = dictjson.get('ip', '')
 
-        self.firstSeen = parser.parse(dictjson['firstseen'])
-        self.lastSeen = parser.parse(dictjson['lastseen'])
+        if 'firstseen' in dictjson:
+            try:
+                self.firstSeen = parser.parse(dictjson['firstseen'])
+            except Exception:
+                pass
+        if 'lastseen' in dictjson:
+            try:
+                self.lastSeen = parser.parse(dictjson['lastseen'])
+            except Exception:
+                pass
 
-        self.gps.latitude = float(dictjson['lat'])
-        self.gps.longitude = float(dictjson['lon'])
-        self.gps.altitude = float(dictjson['alt'])
-        self.gps.speed = float(dictjson['speed'])
-        self.gps.isValid = stringtobool(dictjson['gpsvalid'])
+        if 'lat' in dictjson:
+            self.gps.latitude = float(dictjson['lat'])
+            self.gps.longitude = float(dictjson['lon'])
+            self.gps.altitude = float(dictjson['alt'])
+            self.gps.speed = float(dictjson['speed'])
+            self.gps.isValid = stringtobool(dictjson.get('gpsvalid', 'False'))
         
-        self.strongestgps.latitude = float(dictjson['strongestlat'])
-        self.strongestgps.longitude = float(dictjson['strongestlon'])
-        self.strongestgps.altitude = float(dictjson['strongestalt'])
-        self.strongestgps.speed = float(dictjson['strongestspeed'])
-        self.strongestgps.isValid = stringtobool(dictjson['strongestgpsvalid'])
-        
-        self.probedSSIDs = dictjson['probedssids']
+        self.probedSSIDs = dictjson.get('probedssids', dictjson.get('probedSSIDs', []))
             
     def fromJson(self, jsonstr):
         dictjson = json.loads(jsonstr)
@@ -265,9 +273,13 @@ class WirelessClient(object):
         dictjson['type'] = 'wifi-client'
         dictjson['macAddr'] = self.macAddr
         dictjson['apMacAddr'] = self.apMacAddr
+        dictjson['bssid'] = self.apMacAddr
         dictjson['ssid'] = self.ssid
         dictjson['channel'] = self.channel
         dictjson['signal'] = self.signal
+        dictjson['packetCount'] = getattr(self, 'packetCount', 1)
+        dictjson['vendor'] = getattr(self, 'vendor', '')
+        dictjson['ip'] = getattr(self, 'ip', '')
         dictjson['firstseen'] = str(self.firstSeen)
         dictjson['lastseen'] = str(self.lastSeen)
         dictjson['lat'] = str(self.gps.latitude)
@@ -275,16 +287,9 @@ class WirelessClient(object):
         dictjson['alt'] = str(self.gps.altitude)
         dictjson['speed'] = str(self.gps.speed)
         dictjson['gpsvalid'] = str(self.gps.isValid)
-        
         dictjson['strongestsignal'] = self.strongestsignal
-        dictjson['strongestlat'] = str(self.strongestgps.latitude)
-        dictjson['strongestlon'] = str(self.strongestgps.longitude)
-        dictjson['strongestalt'] = str(self.strongestgps.altitude)
-        dictjson['strongestspeed'] = str(self.strongestgps.speed)
-        dictjson['strongestgpsvalid'] = str(self.strongestgps.isValid)
-
-        dictjson['probedssids'] = self.probedSSIDs
-        
+        dictjson['probedssids'] = list(self.probedSSIDs)
+        dictjson['probedSSIDs'] = list(self.probedSSIDs)
         return dictjson
         
 class WirelessNetwork(object):
@@ -498,6 +503,9 @@ _P_STATIONCOUNT = re.compile('.*station count: ([0-9]+)')
 _P_UTILIZATION = re.compile('.*channel utilisation: ([0-9]+)/255')
 
 class WirelessEngine(object):
+    detectedClients = {}
+    detectedNetworks = {}
+
     def __init__(self):
         super().__init__()
 
@@ -950,6 +958,10 @@ class WirelessEngine(object):
                 if curNet.channel > 0 or curNet.frequency > 0:
                     retVal[curNet.getKey()] = curNet
 
+        for net in retVal.values():
+            if net.ssid and net.ssid not in ("<Hidden>", "<Unknown>"):
+                WirelessEngine.detectedNetworks[net.macAddr] = net.ssid
+
         return retVal
 
     @staticmethod
@@ -978,8 +990,24 @@ class WirelessEngine(object):
         return {}
 
     @staticmethod
-    def scanMonitorNetworks(interfaceName, frequency=0, printResults=False):
-        """Passive monitor-mode frame sniffer capturing 802.11 beacons and probe responses with channel hopping."""
+    def interfaceSupports5GHz(interfaceName):
+        """Checks if a wireless interface supports 5 GHz frequencies."""
+        try:
+            res = subprocess.run(['iw', 'dev', interfaceName, 'info'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=1)
+            out = res.stdout.decode()
+            wiphy_m = re.search(r'wiphy\s+([0-9]+)', out)
+            if wiphy_m:
+                phy_id = wiphy_m.group(1)
+                res_phy = subprocess.run(['iw', f'phy{phy_id}', 'channels'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=1)
+                if '5180 MHz' in res_phy.stdout.decode():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def scanMonitorNetworksAndClients(interfaceName, frequency=0, printResults=False):
+        """Passive monitor-mode frame sniffer capturing 802.11 beacons, probe requests, and client data frames."""
         if frequency > 0:
             if str(frequency) in freqToChannel:
                 channels = [int(freqToChannel[str(frequency)])]
@@ -987,11 +1015,18 @@ class WirelessEngine(object):
                 channels = [int(frequency)]
             dwell = 0.8
         else:
-            channels = list(range(1, 14))
-            dwell = 0.25
+            if WirelessEngine.interfaceSupports5GHz(interfaceName):
+                channels = [1, 6, 9, 11, 36, 40, 44, 48, 149, 153, 157, 161, 2, 3, 4, 5, 7, 8, 10, 12, 13]
+                dwell = 0.25
+            else:
+                channels = [1, 6, 9, 11, 2, 3, 4, 5, 7, 8, 10, 12, 13]
+                dwell = 0.35
 
         allNetworks = {}
+        allClients = dict(WirelessEngine.detectedClients)
         now = datetime.datetime.now()
+
+        multicast = lambda m: not m or m.startswith('01:00:5E') or m.startswith('33:33') or m.startswith('01:80:C2') or m == 'FF:FF:FF:FF:FF:FF'
 
         for ch in channels:
             freq = int(channelToFreq.get(str(ch), 2412))
@@ -1008,10 +1043,11 @@ class WirelessEngine(object):
             except Exception:
                 pass
 
-            # Primary capture: tcpdump with line-buffering (-l) and timeout
+            # Primary capture: tcpdump capturing beacons, probe responses, probe requests, and data frames
             captured_lines = []
-            tcpdump_cmd = ['timeout', str(dwell), 'tcpdump', '-l', '-i', interfaceName, '-c', '30',
-                           '-nn', '-e', '-s', '256', 'type mgt subtype beacon or type mgt subtype probe-resp']
+            tcpdump_cmd = ['timeout', str(dwell), 'tcpdump', '-l', '-i', interfaceName, '-c', '60',
+                           '-nn', '-e', '-s', '256',
+                           'type data or type mgt subtype beacon or type mgt subtype probe-resp or type mgt subtype probe-req or type mgt subtype assoc-req or type mgt subtype reassoc-req']
             try:
                 res = subprocess.run(tcpdump_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 if res.stdout:
@@ -1029,153 +1065,128 @@ class WirelessEngine(object):
 
             if captured_lines:
                 for line in captured_lines:
-                    bssid_m = re.search(r'(?:BSSID:|SA:)\s*([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})', line)
-                    if not bssid_m:
-                        continue
-                    bssid = bssid_m.group(1).upper()
-
-                    ssid_m = re.search(r'(?:Beacon|Probe Response)\s*\((.*?)\)', line)
-                    ssid = ssid_m.group(1) if ssid_m else "<Hidden>"
-
+                    bssid_m = re.search(r'BSSID:([0-9a-fA-F:]{17})', line)
+                    sa_m = re.search(r'SA:([0-9a-fA-F:]{17})', line)
+                    da_m = re.search(r'DA:([0-9a-fA-F:]{17})', line)
                     sig_m = re.search(r'(-?[0-9]+)dBm\s+signal', line)
-                    sig = int(sig_m.group(1)) if sig_m else -75
-
                     ch_m = re.search(r'CH:\s*([0-9]+)', line)
+
+                    bssid = bssid_m.group(1).upper() if bssid_m else None
+                    sa = sa_m.group(1).upper() if sa_m else None
+                    da = da_m.group(1).upper() if da_m else None
+                    sig = int(sig_m.group(1)) if sig_m else -75
                     channel = int(ch_m.group(1)) if ch_m else ch
 
-                    is_beacon = 'Beacon' in line
-                    key = bssid + ssid + str(channel)
+                    # 1. Check Access Point (Beacon or Probe Response)
+                    if ('Beacon' in line or 'Probe Response' in line) and (bssid or sa):
+                        ap_mac = bssid if bssid else sa
+                        ssid_m = re.search(r'(?:Beacon|Probe Response)\s*\((.*?)\)', line)
+                        ssid = ssid_m.group(1) if ssid_m else "<Hidden>"
+                        is_beacon = 'Beacon' in line
+                        key = ap_mac + ssid + str(channel)
 
-                    if key in allNetworks:
-                        curNet = allNetworks[key]
-                        if is_beacon:
-                            curNet.beaconCount += 1
-                        curNet.lastSeen = now
-                        if sig > -100:
-                            curNet.signal = sig
-                            if curNet.signal > curNet.strongestsignal:
-                                curNet.strongestsignal = curNet.signal
-                        if ssid != "<Hidden>" and curNet.ssid == "<Hidden>":
-                            curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
-                    else:
-                        curNet = WirelessNetwork()
-                        curNet.macAddr = bssid.upper()
-                        curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
-                        curNet.mode = "AP"
-                        curNet.channel = channel
-                        curNet.frequency = freq
-                        curNet.signal = sig
-                        curNet.strongestsignal = sig
-                        curNet.security = "WPA2/WPA3" if ("WPA" in line or "RSN" in line or "PRIVACY" in line) else "Open"
-                        curNet.privacy = curNet.security
-                        curNet.beaconCount = 1 if is_beacon else 0
-                        curNet.firstSeen = now
-                        curNet.lastSeen = now
-                        allNetworks[key] = curNet
+                        if ssid and ssid not in ("<Hidden>", "<Unknown>"):
+                            WirelessEngine.detectedNetworks[ap_mac] = ssid
 
-            # Secondary fallback: tshark with valid fields and hex SSID decoding
-            elif shutil.which('tshark'):
-                try:
-                    cmd = [
-                        'timeout', '1.0', 'tshark', '-l', '-i', interfaceName,
-                        '-c', '30',
-                        '-Y', 'wlan.fc.type_subtype == 8 || wlan.fc.type_subtype == 5',
-                        '-T', 'fields',
-                        '-e', 'wlan.bssid',
-                        '-e', 'wlan.ssid',
-                        '-e', 'radiotap.dbm_antsignal',
-                        '-e', 'wlan_radio.channel',
-                        '-e', 'wlan.fc.type_subtype',
-                        '-e', 'wlan.rsn.version',
-                        '-e', 'wlan.fixed.capabilities.privacy'
-                    ]
-                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                    if res.stdout:
-                        for line in res.stdout.decode('utf-8', errors='ignore').splitlines():
-                            parts = line.split('\t')
-                            if len(parts) < 4:
-                                continue
-                            raw_bssid = parts[0].strip()
-                            if not raw_bssid or len(raw_bssid.split(':')) != 6:
-                                continue
-                            bssid = raw_bssid.upper()
-
-                            raw_ssid = parts[1].strip() if len(parts) > 1 else ""
-                            ssid = raw_ssid
-                            if raw_ssid:
-                                try:
-                                    decoded = bytes.fromhex(raw_ssid).decode('utf-8', errors='ignore')
-                                    if decoded and any(c.isalnum() for c in decoded):
-                                        ssid = decoded
-                                except Exception:
-                                    pass
-                            if not ssid:
-                                ssid = "<Hidden>"
-
-                            sig = -75
-                            if len(parts) > 2 and parts[2].strip():
-                                try:
-                                    sig = int(parts[2].split(',')[0].strip())
-                                except Exception:
-                                    sig = -75
-
-                            channel = ch
-                            if len(parts) > 3 and parts[3].strip():
-                                try:
-                                    channel = int(parts[3].split(',')[0].strip())
-                                except Exception:
-                                    channel = ch
-
-                            subtype = 8
-                            if len(parts) > 4 and parts[4].strip():
-                                try:
-                                    val = parts[4].split(',')[0].strip()
-                                    subtype = int(val, 0)
-                                except Exception:
-                                    subtype = 8
-
-                            is_beacon = (subtype == 8)
-                            key = bssid + ssid + str(channel)
-
-                            if key in allNetworks:
-                                curNet = allNetworks[key]
-                                if is_beacon:
-                                    curNet.beaconCount += 1
-                                curNet.lastSeen = now
-                                if sig > -100:
-                                    curNet.signal = sig
-                                    if curNet.signal > curNet.strongestsignal:
-                                        curNet.strongestsignal = curNet.signal
-                                if ssid != "<Hidden>" and curNet.ssid == "<Hidden>":
-                                    curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
-                            else:
-                                curNet = WirelessNetwork()
-                                curNet.macAddr = bssid.upper()
-                                curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
-                                curNet.mode = "AP"
-                                curNet.channel = channel
-                                curNet.frequency = freq
+                        if key in allNetworks:
+                            curNet = allNetworks[key]
+                            if is_beacon:
+                                curNet.beaconCount += 1
+                            curNet.lastSeen = now
+                            if sig > -100:
                                 curNet.signal = sig
-                                curNet.strongestsignal = sig
-                                curNet.security = "WPA2/WPA3" if len(parts) > 5 and parts[5].strip() else "Open"
-                                curNet.privacy = curNet.security
-                                curNet.beaconCount = 1 if is_beacon else 0
-                                curNet.firstSeen = now
-                                curNet.lastSeen = now
-                                allNetworks[key] = curNet
-                except Exception:
-                    pass
+                                if curNet.signal > curNet.strongestsignal:
+                                    curNet.strongestsignal = curNet.signal
+                            if ssid != "<Hidden>" and curNet.ssid == "<Hidden>":
+                                curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
+                        else:
+                            curNet = WirelessNetwork()
+                            curNet.macAddr = ap_mac
+                            curNet.ssid = WirelessEngine.convertUnknownToString(ssid)
+                            curNet.mode = "AP"
+                            curNet.channel = channel
+                            curNet.frequency = freq
+                            curNet.signal = sig
+                            curNet.strongestsignal = sig
+                            curNet.security = "WPA2/WPA3" if ("WPA" in line or "RSN" in line or "PRIVACY" in line) else "Open"
+                            curNet.privacy = curNet.security
+                            curNet.beaconCount = 1 if is_beacon else 0
+                            curNet.firstSeen = now
+                            curNet.lastSeen = now
+                            allNetworks[key] = curNet
 
-        return 0, "", allNetworks
+                    # 2. Extract Client Stations from Data Frames
+                    if 'Data' in line or 'QoS' in line:
+                        if bssid:
+                            client_mac = None
+                            if sa and not multicast(sa) and sa != bssid:
+                                client_mac = sa
+                            elif da and not multicast(da) and da != bssid:
+                                client_mac = da
 
-    def scanForNetworks(interfaceName, frequency=0, printResults=False):
+                            if client_mac:
+                                client = allClients.get(client_mac, WirelessClient())
+                                client.macAddr = client_mac
+                                client.apMacAddr = bssid
+                                client.channel = channel
+                                if sig > -100:
+                                    client.signal = sig
+                                client.packetCount = getattr(client, 'packetCount', 0) + 1
+                                client.lastSeen = now
+                                if bssid in WirelessEngine.detectedNetworks:
+                                    client.ssid = WirelessEngine.detectedNetworks[bssid]
+                                else:
+                                    for ap in allNetworks.values():
+                                        if ap.macAddr == bssid and ap.ssid and ap.ssid not in ("<Hidden>", "<Unknown>"):
+                                            client.ssid = ap.ssid
+                                            WirelessEngine.detectedNetworks[bssid] = ap.ssid
+                                            break
+                                allClients[client_mac] = client
+
+                    # 3. Extract Probing Client Devices
+                    elif 'Probe Request' in line:
+                        if sa and not multicast(sa):
+                            client_mac = sa
+                            probe_m = re.search(r'Probe Request \((.*?)\)', line)
+                            probed_ssid = probe_m.group(1).strip() if probe_m else ""
+                            client = allClients.get(client_mac, WirelessClient())
+                            client.macAddr = client_mac
+                            client.channel = channel
+                            if sig > -100:
+                                client.signal = sig
+                            client.packetCount = getattr(client, 'packetCount', 0) + 1
+                            client.lastSeen = now
+                            if probed_ssid and probed_ssid not in client.probedSSIDs:
+                                client.probedSSIDs.append(probed_ssid)
+                            allClients[client_mac] = client
+
+        # Update station counts on Access Points based on live connected clients
+        for ap in allNetworks.values():
+            connected = [c for c in allClients.values() if c.apMacAddr and c.apMacAddr == ap.macAddr]
+            ap.stationcount = len(connected)
+
+        WirelessEngine.detectedClients = allClients
+        return 0, "", allNetworks, allClients
+
+    @staticmethod
+    def scanMonitorNetworks(interfaceName, frequency=0, printResults=False):
+        retCode, errString, allNetworks, _ = WirelessEngine.scanMonitorNetworksAndClients(interfaceName, frequency, printResults)
+        return retCode, errString, allNetworks
+
+    @staticmethod
+    def scanForNetworksAndClients(interfaceName, frequency=0, printResults=False):
+        """Scans for both Access Points and Connected Clients across monitor or managed interfaces."""
         WirelessEngine.ensureInterfaceUp(interfaceName)
 
-        # 1. Monitor mode interface
+        # 1. Monitor mode interface (raw 802.11 sniffing)
         if WirelessEngine.isMonitorMode(interfaceName):
-            return WirelessEngine.scanMonitorNetworks(interfaceName, frequency, printResults)
+            return WirelessEngine.scanMonitorNetworksAndClients(interfaceName, frequency, printResults)
 
-        # 2. Managed mode scan via iw
+        # 2. Managed mode scan
+        allClients = dict(WirelessEngine.detectedClients)
+        now = datetime.datetime.now()
+
+        # Try iw scan first
         retCode = -1
         wirelessResult = ""
         try:
@@ -1191,14 +1202,58 @@ class WirelessEngine(object):
         except Exception:
             retCode = -1
 
+        allNetworks = {}
         if retCode == 0:
-            wirelessNetworks = WirelessEngine.parseIWoutput(wirelessResult)
-            return 0, "", wirelessNetworks
+            allNetworks = WirelessEngine.parseIWoutput(wirelessResult)
+        else:
+            # Fallback to nmcli
+            nmcli_nets = WirelessEngine.scanViaNmcli(interfaceName, frequency)
+            if nmcli_nets and len(nmcli_nets) > 0:
+                allNetworks = nmcli_nets
+                retCode = 0
 
-        # 3. Resilient fallback to nmcli if unprivileged or interface busy
-        nmcli_nets = WirelessEngine.scanViaNmcli(interfaceName, frequency)
-        if nmcli_nets and len(nmcli_nets) > 0:
-            return 0, "", nmcli_nets
+        # In managed mode, also discover clients on the currently connected network via ARP / ip neigh
+        current_bssid = ""
+        current_ssid = ""
+        try:
+            res = subprocess.run(['iw', 'dev', interfaceName, 'link'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=1)
+            link_out = res.stdout.decode()
+            bssid_m = re.search(r'Connected to ([0-9a-fA-F:]{17})', link_out)
+            if bssid_m:
+                current_bssid = bssid_m.group(1).upper()
+            ssid_m = re.search(r'SSID: (.*)', link_out)
+            if ssid_m:
+                current_ssid = ssid_m.group(1).strip()
+        except Exception:
+            pass
+
+        try:
+            with open('/proc/net/arp', 'r') as f:
+                for line in f.readlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 6:
+                        ip, mac, dev = parts[0], parts[3].upper(), parts[5]
+                        if dev == interfaceName and mac != '00:00:00:00:00:00':
+                            cl = allClients.get(mac, WirelessClient())
+                            cl.macAddr = mac
+                            cl.ip = ip
+                            cl.apMacAddr = current_bssid
+                            cl.ssid = current_ssid
+                            cl.lastSeen = now
+                            cl.packetCount = getattr(cl, 'packetCount', 0) + 1
+                            allClients[mac] = cl
+        except Exception:
+            pass
+
+        # Update station counts
+        for ap in allNetworks.values():
+            connected = [c for c in allClients.values() if c.apMacAddr and c.apMacAddr == ap.macAddr]
+            if len(connected) > 0 or ap.stationcount < 0:
+                ap.stationcount = len(connected)
+
+        WirelessEngine.detectedClients = allClients
+        if retCode == 0:
+            return 0, "", allNetworks, allClients
 
         errString = wirelessResult.replace("\n", " ").strip()
         if retCode == WirelessNetwork.ERR_NETDOWN:
@@ -1208,7 +1263,11 @@ class WirelessEngine(object):
         elif retCode == WirelessNetwork.ERR_OPNOTPERMITTED:
             errString = f"Root privileges required for iw scan on {interfaceName}."
 
-        return retCode, errString, {}
+        return retCode, errString, allNetworks, allClients
+
+    def scanForNetworks(interfaceName, frequency=0, printResults=False):
+        retCode, errString, allNetworks, _ = WirelessEngine.scanForNetworksAndClients(interfaceName, frequency, printResults)
+        return retCode, errString, allNetworks
         
     def getFieldValue(p, curLine):
         matchobj = p.search(curLine)
@@ -1410,6 +1469,10 @@ class WirelessEngine(object):
                 # I did see incomplete output from iw where not all the data was there
                 retVal[curNetwork.getKey()] = curNetwork
         
+        for net in retVal.values():
+            if net.ssid and net.ssid not in ("<Hidden>", "<Unknown>"):
+                WirelessEngine.detectedNetworks[net.macAddr] = net.ssid
+
         return retVal
         
 if __name__ == '__main__':

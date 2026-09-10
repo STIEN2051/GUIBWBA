@@ -92,15 +92,112 @@ def test_gui_table_structure_offscreen():
     net.frequency = 2412
     net.signal = -70
     net.beaconCount = 7
+    net.stationcount = 3
 
     win.populateTable({net.getKey(): net})
     assert win.networkTable.rowCount() == 1
     assert win.networkTable.item(0, 8).text() == "7"
+    assert win.networkTable.item(0, 11).text() == "3"
 
     # Accumulate beacons update
     net_update = net.copy()
     net_update.beaconCount = 5
+    net_update.stationcount = 4
     win.populateTable({net_update.getKey(): net_update})
     assert win.networkTable.item(0, 8).text() == "12"
+    assert win.networkTable.item(0, 11).text() == "4"
 
     win.close()
+
+
+def test_wireless_client_data_model():
+    from wirelessengine import WirelessClient
+    client = WirelessClient()
+    client.macAddr = "F0:6C:5D:95:4E:08"
+    client.bssid = "24:2F:D0:F4:9E:61"
+    client.ssid = "IdeaLab-3(2.4)"
+    client.signal = -72
+    client.packetCount = 42
+    client.probedSSIDs = ["HomeNetwork", "CoffeeShop"]
+
+    assert client.getKey() == "F0:6C:5D:95:4E:08"
+
+    # Serialization test
+    d = client.toJsondict()
+    assert d['macAddr'] == "F0:6C:5D:95:4E:08"
+    assert d['bssid'] == "24:2F:D0:F4:9E:61"
+    assert d['packetCount'] == 42
+    assert "HomeNetwork" in d['probedSSIDs']
+
+    # Deserialization test
+    restored = WirelessClient.createFromJsonDict(d)
+    assert restored.macAddr == "F0:6C:5D:95:4E:08"
+    assert restored.bssid == "24:2F:D0:F4:9E:61"
+    assert restored.packetCount == 42
+    assert restored.signal == -72
+    assert restored.probedSSIDs == ["HomeNetwork", "CoffeeShop"]
+
+
+def test_gui_client_table_offscreen():
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PyQt5.QtWidgets import QApplication
+    import importlib
+    from wirelessengine import WirelessClient
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    sparrow_mod = importlib.import_module('sparrow-wifi')
+    win = sparrow_mod.mainWindow()
+
+    # Verify clientTable exists and has 8 columns
+    assert hasattr(win, 'clientTable')
+    assert win.clientTable.columnCount() == 8
+    expected_headers = [
+        'Client MAC Address', 'Vendor', 'Connected AP (BSSID)', 'Network (SSID)',
+        'Signal (dBm)', 'Packets', 'Probed SSIDs', 'Last Seen'
+    ]
+    actual_headers = [win.clientTable.horizontalHeaderItem(i).text() for i in range(8)]
+    assert actual_headers == expected_headers
+
+    # Create test clients
+    client1 = WirelessClient()
+    client1.macAddr = "AA:BB:CC:DD:EE:01"
+    client1.bssid = "11:22:33:44:55:66"
+    client1.ssid = "AP-One"
+    client1.signal = -60
+    client1.packetCount = 10
+    client1.probedSSIDs = ["GuestWiFi"]
+
+    client2 = WirelessClient()
+    client2.macAddr = "AA:BB:CC:DD:EE:02"
+    client2.bssid = "77:88:99:AA:BB:CC"
+    client2.ssid = "AP-Two"
+    client2.signal = -80
+    client2.packetCount = 5
+
+    # Populate client table
+    win.populateClientTable({client1.getKey(): client1, client2.getKey(): client2})
+    assert win.clientTable.rowCount() == 2
+
+    # Filter client table to AP-One only
+    win.filterClientTableRows("11:22:33:44:55:66")
+    for r in range(win.clientTable.rowCount()):
+        apMac = win.clientTable.item(r, 2).text().strip().upper()
+        if apMac == "11:22:33:44:55:66":
+            assert not win.clientTable.isRowHidden(r)
+        else:
+            assert win.clientTable.isRowHidden(r)
+
+    # Show all
+    win.onShowAllClientsClicked()
+    visible_count = 0
+    for r in range(win.clientTable.rowCount()):
+        if not win.clientTable.isRowHidden(r):
+            visible_count += 1
+    assert visible_count == 2
+
+    # Test Clear Clients
+    win.onClearClientsClicked()
+    assert win.clientTable.rowCount() == 0
+
+    win.close()
+

@@ -34,13 +34,13 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog,
     QLineEdit, QAbstractItemView, QMenu, QAction,
     QComboBox, QLabel, QPushButton, QCheckBox, QTableWidget,
-    QTableWidgetItem, QHeaderView
+    QTableWidgetItem, QHeaderView, QSplitter
 )
 from PyQt5.QtGui import QIcon, QFont, QBrush, QColor
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5 import QtCore
 
-from wirelessengine import WirelessEngine, WirelessNetwork
+from wirelessengine import WirelessEngine, WirelessNetwork, WirelessClient
 from sparrowcommon import BaseThreadClass, stringtobool
 from sparrowtablewidgets import IntTableWidgetItem, DateTableWidgetItem, FloatTableWidgetItem
 from sparrowbluetooth import SparrowBluetooth, BluetoothDevice
@@ -96,11 +96,11 @@ class ScanThread(BaseThreadClass):
         while not self.signalStop:
             if (self.channelList is None) or (len(self.channelList) == 0):
                 # All-channel / Normal mode
-                retCode, errString, wirelessNetworks = WirelessEngine.scanForNetworks(self.interface)
+                retCode, errString, wirelessNetworks, wirelessClients = WirelessEngine.scanForNetworksAndClients(self.interface)
                 if retCode == 0:
                     if wirelessNetworks and (len(wirelessNetworks) > 0) and (not self.signalStop):
                         if not self.mainWin._tableUpdateInProgress:
-                            self.mainWin.scanresults.emit(wirelessNetworks)
+                            self.mainWin.scanresults.emit(wirelessNetworks, wirelessClients)
                 else:
                     if retCode != WirelessNetwork.ERR_DEVICEBUSY:
                         self.mainWin.errmsg.emit(retCode, errString)
@@ -111,11 +111,11 @@ class ScanThread(BaseThreadClass):
                 for curFrequency in self.channelList:
                     if self.signalStop:
                         break
-                    retCode, errString, wirelessNetworks = WirelessEngine.scanForNetworks(self.interface, curFrequency)
+                    retCode, errString, wirelessNetworks, wirelessClients = WirelessEngine.scanForNetworksAndClients(self.interface, curFrequency)
                     if retCode == 0:
                         if wirelessNetworks and (len(wirelessNetworks) > 0) and (not self.signalStop):
                             if not self.mainWin._tableUpdateInProgress:
-                                self.mainWin.scanresults.emit(wirelessNetworks)
+                                self.mainWin.scanresults.emit(wirelessNetworks, wirelessClients)
                     else:
                         if retCode != WirelessNetwork.ERR_DEVICEBUSY:
                             self.mainWin.errmsg.emit(retCode, errString)
@@ -129,7 +129,7 @@ class ScanThread(BaseThreadClass):
 class mainWindow(QMainWindow):
 
     # Signals
-    scanresults = QtCore.pyqtSignal(dict)
+    scanresults = QtCore.pyqtSignal(dict, dict)
     errmsg = QtCore.pyqtSignal(int, str)
     rescanInterfaces = QtCore.pyqtSignal()
 
@@ -151,9 +151,13 @@ class mainWindow(QMainWindow):
         self.scanMode = "Normal"
         self.huntChannelList = []
         self.updateLock = Lock()
+        self.clientUpdateLock = Lock()
         self._tableUpdateInProgress = False
+        self.selectedApMac = None
         self.wifiTableSortOrder = Qt.DescendingOrder
         self.wifiTableSortIndex = -1
+        self.clientTableSortOrder = Qt.DescendingOrder
+        self.clientTableSortIndex = -1
 
         # Bluetooth Scanner State
         self.hasBluetooth = False
@@ -415,8 +419,24 @@ class mainWindow(QMainWindow):
 
         layout.addLayout(controlsLayout)
 
+        # Main vertical splitter for Access Points and Connected Clients
+        self.wifiSplitter = QSplitter(Qt.Vertical, tab)
+
+        # 1. Top Section: Access Points Table
+        apWidget = QWidget(self.wifiSplitter)
+        apLayout = QVBoxLayout(apWidget)
+        apLayout.setContentsMargins(0, 0, 0, 0)
+        apLayout.setSpacing(4)
+
+        apHeaderLayout = QHBoxLayout()
+        self.lblApTitle = QLabel("📡 Access Points (Wi-Fi Networks) — Click an AP to filter its connected clients", apWidget)
+        self.lblApTitle.setStyleSheet("font-weight: bold; color: #60cdff; padding: 2px;")
+        apHeaderLayout.addWidget(self.lblApTitle)
+        apHeaderLayout.addStretch()
+        apLayout.addLayout(apHeaderLayout)
+
         # Network Table
-        self.networkTable = QTableWidget(tab)
+        self.networkTable = QTableWidget(apWidget)
         self.networkTable.setColumnCount(14)
         self.networkTable.setShowGrid(True)
         self.networkTable.setHorizontalHeaderLabels([
@@ -429,6 +449,7 @@ class mainWindow(QMainWindow):
         self.networkTable.horizontalHeader().sectionClicked.connect(self.onWifiTableHeadingClicked)
         self.networkTable.setSelectionMode(QAbstractItemView.SingleSelection)
         self.networkTable.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.networkTable.itemSelectionChanged.connect(self.onApSelectionChanged)
 
         # Right-click context menu
         self.networkTable.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -445,7 +466,52 @@ class mainWindow(QMainWindow):
         deleteAct.triggered.connect(self.onDeleteWifiNet)
         self.wifiContextMenu.addAction(deleteAct)
 
-        layout.addWidget(self.networkTable)
+        apLayout.addWidget(self.networkTable)
+
+        # 2. Bottom Section: Connected Clients & Probing Devices
+        clientWidget = QWidget(self.wifiSplitter)
+        clientLayout = QVBoxLayout(clientWidget)
+        clientLayout.setContentsMargins(0, 4, 0, 0)
+        clientLayout.setSpacing(4)
+
+        clientHeaderLayout = QHBoxLayout()
+        self.lblClientsTitle = QLabel("📱 Connected Clients & Probing Devices (All)", clientWidget)
+        self.lblClientsTitle.setStyleSheet("font-weight: bold; color: #a6e22e; padding: 2px;")
+        clientHeaderLayout.addWidget(self.lblClientsTitle)
+        clientHeaderLayout.addStretch()
+
+        self.btnShowAllClients = QPushButton("Show All Devices", clientWidget)
+        self.btnShowAllClients.setStyleSheet("background-color: #333; color: white; border-radius: 3px; padding: 3px 10px; font-size: 11px;")
+        self.btnShowAllClients.clicked.connect(self.onShowAllClientsClicked)
+        clientHeaderLayout.addWidget(self.btnShowAllClients)
+
+        self.btnClearClients = QPushButton("Clear Clients", clientWidget)
+        self.btnClearClients.setStyleSheet("background-color: #333; color: white; border-radius: 3px; padding: 3px 10px; font-size: 11px;")
+        self.btnClearClients.clicked.connect(self.onClearClientsClicked)
+        clientHeaderLayout.addWidget(self.btnClearClients)
+
+        clientLayout.addLayout(clientHeaderLayout)
+
+        self.clientTable = QTableWidget(clientWidget)
+        self.clientTable.setColumnCount(8)
+        self.clientTable.setShowGrid(True)
+        self.clientTable.setHorizontalHeaderLabels([
+            'Client MAC Address', 'Vendor', 'Connected AP (BSSID)', 'Network (SSID)',
+            'Signal (dBm)', 'Packets', 'Probed SSIDs', 'Last Seen'
+        ])
+        self.clientTable.setRowCount(0)
+        self.clientTable.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.clientTable.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.clientTable.horizontalHeader().sectionClicked.connect(self.onClientTableHeadingClicked)
+        self.clientTable.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.clientTable.setSelectionBehavior(QAbstractItemView.SelectRows)
+        clientLayout.addWidget(self.clientTable)
+
+        self.wifiSplitter.addWidget(apWidget)
+        self.wifiSplitter.addWidget(clientWidget)
+        self.wifiSplitter.setSizes([340, 220])
+
+        layout.addWidget(self.wifiSplitter)
         return tab
 
     # ------------------ Bluetooth Tab Construction ------------------
@@ -556,6 +622,11 @@ class mainWindow(QMainWindow):
         self.bluetoothTable.horizontalHeader().setStyleSheet(headerStyle)
         self.bluetoothTable.verticalHeader().setStyleSheet(headerStyle)
 
+        self.clientTable.setStyleSheet(tableStyle)
+        self.clientTable.horizontalHeader().setStyleSheet(headerStyle)
+        self.clientTable.verticalHeader().setStyleSheet(headerStyle)
+        self.wifiSplitter.setStyleSheet("QSplitter::handle { background-color: #333333; height: 3px; }")
+
         tabStyle = (
             "QTabWidget::pane { border: 1px solid #444; background: #1a1a1a; }"
             "QTabBar::tab {"
@@ -658,13 +729,16 @@ class mainWindow(QMainWindow):
 
         self.btnScan.setShortcut('Ctrl+S')
 
-    def scanResults(self, wirelessNetworks):
+    def scanResults(self, wirelessNetworks, wirelessClients=None):
         if self.scanRunning:
             curInterface = str(self.combo.currentText()) if self.combo.count() > 0 else ""
             if WirelessEngine.isMonitorMode(curInterface):
                 total_beacons = sum(getattr(n, 'beaconCount', 0) for n in wirelessNetworks.values())
-                self.statusBar().showMessage(f"Monitor Mode active on {curInterface}: {len(wirelessNetworks)} Access Point(s) detected, {total_beacons} Beacon frame(s) captured.")
+                client_count = len(wirelessClients) if wirelessClients else 0
+                self.statusBar().showMessage(f"Monitor Mode active on {curInterface}: {len(wirelessNetworks)} Access Point(s), {client_count} Client device(s), {total_beacons} Beacon frame(s) captured.")
             self.populateTable(wirelessNetworks)
+            if wirelessClients is not None:
+                self.populateClientTable(wirelessClients)
 
     def onErrMsg(self, errCode, errMsg):
         # Show a non-fatal status message. Do NOT auto-kill the scan thread
@@ -711,7 +785,8 @@ class mainWindow(QMainWindow):
 
                     self.networkTable.item(curRow, 9).setText(str(curNet.bandwidth))
                     self.networkTable.item(curRow, 10).setText(str(curNet.utilization))
-                    self.networkTable.item(curRow, 11).setText(str(curNet.stationcount))
+                    stCountStr = str(curNet.stationcount) if curNet.stationcount >= 0 else "-"
+                    self.networkTable.item(curRow, 11).setText(stCountStr)
                     self.networkTable.item(curRow, 12).setText(curNet.lastSeen.strftime("%m/%d/%Y %H:%M:%S"))
 
                     curNet.firstSeen = curData.firstSeen
@@ -765,7 +840,8 @@ class mainWindow(QMainWindow):
                 self.networkTable.setItem(0, 8, IntTableWidgetItem(beaconStr))
                 self.networkTable.setItem(0, 9, IntTableWidgetItem(str(curNet.bandwidth)))
                 self.networkTable.setItem(0, 10, FloatTableWidgetItem(str(curNet.utilization)))
-                self.networkTable.setItem(0, 11, IntTableWidgetItem(str(curNet.stationcount)))
+                stCountStr = str(curNet.stationcount) if curNet.stationcount >= 0 else "-"
+                self.networkTable.setItem(0, 11, IntTableWidgetItem(stCountStr))
                 self.networkTable.setItem(0, 12, DateTableWidgetItem(curNet.lastSeen.strftime("%m/%d/%Y %H:%M:%S")))
                 self.networkTable.setItem(0, 13, DateTableWidgetItem(curNet.firstSeen.strftime("%m/%d/%Y %H:%M:%S")))
 
@@ -780,6 +856,107 @@ class mainWindow(QMainWindow):
         finally:
             self.updateLock.release()
             self._tableUpdateInProgress = False
+
+    # ------------------ Client Stations Table Handlers ------------------
+    def onApSelectionChanged(self):
+        selectedRows = self.networkTable.selectionModel().selectedRows()
+        if not selectedRows or len(selectedRows) == 0:
+            self.selectedApMac = None
+            self.lblClientsTitle.setText("📱 Connected Clients & Probing Devices (All)")
+            self.filterClientTableRows()
+            return
+
+        row = selectedRows[0].row()
+        macItem = self.networkTable.item(row, 0)
+        ssidItem = self.networkTable.item(row, 2)
+        if macItem:
+            self.selectedApMac = macItem.text().strip().upper()
+            ssidText = ssidItem.text().strip() if ssidItem else ""
+            self.lblClientsTitle.setText(f"📱 Connected Clients for '{ssidText}' [{self.selectedApMac}]")
+            self.filterClientTableRows()
+
+    def onShowAllClientsClicked(self):
+        self.networkTable.clearSelection()
+        self.selectedApMac = None
+        self.lblClientsTitle.setText("📱 Connected Clients & Probing Devices (All)")
+        self.filterClientTableRows()
+
+    def onClearClientsClicked(self):
+        self.clientTable.setRowCount(0)
+        WirelessEngine.detectedClients.clear()
+
+    def filterClientTableRows(self, targetApMac=None):
+        if targetApMac is not None:
+            self.selectedApMac = targetApMac.strip().upper() if targetApMac else None
+        numRows = self.clientTable.rowCount()
+        for r in range(numRows):
+            if not self.selectedApMac:
+                self.clientTable.setRowHidden(r, False)
+            else:
+                apItem = self.clientTable.item(r, 2)
+                apMac = apItem.text().strip().upper() if apItem else ""
+                self.clientTable.setRowHidden(r, apMac != self.selectedApMac)
+
+    def onClientTableHeadingClicked(self, logicalIndex):
+        if self.clientTableSortIndex == logicalIndex:
+            if self.clientTableSortOrder == Qt.AscendingOrder:
+                self.clientTableSortOrder = Qt.DescendingOrder
+            else:
+                self.clientTableSortOrder = Qt.AscendingOrder
+        else:
+            self.clientTableSortIndex = logicalIndex
+            self.clientTableSortOrder = Qt.DescendingOrder
+        self.clientTable.sortItems(self.clientTableSortIndex, self.clientTableSortOrder)
+
+    def populateClientTable(self, wirelessClients):
+        if not wirelessClients:
+            return
+
+        self.clientUpdateLock.acquire()
+        try:
+            clientLookup = {c.getKey(): c for c in wirelessClients.values()}
+            numRows = self.clientTable.rowCount()
+            foundKeys = set()
+
+            for curRow in range(numRows):
+                try:
+                    macItem = self.clientTable.item(curRow, 0)
+                    if not macItem:
+                        continue
+                    mac = macItem.text().strip().upper()
+                    if mac in clientLookup:
+                        client = clientLookup[mac]
+                        foundKeys.add(mac)
+                        vendor = self.ouiLookup(client.macAddr)
+                        self.clientTable.item(curRow, 1).setText(vendor)
+                        self.clientTable.item(curRow, 2).setText(client.apMacAddr)
+                        self.clientTable.item(curRow, 3).setText(client.ssid)
+                        self.clientTable.item(curRow, 4).setText(str(client.signal))
+                        self.clientTable.item(curRow, 5).setText(str(client.packetCount))
+                        probes = ", ".join(client.probedSSIDs) if client.probedSSIDs else "-"
+                        self.clientTable.item(curRow, 6).setText(probes)
+                        self.clientTable.item(curRow, 7).setText(client.lastSeen.strftime("%m/%d/%Y %H:%M:%S"))
+                except Exception:
+                    pass
+
+            for mac, client in clientLookup.items():
+                if mac in foundKeys:
+                    continue
+                self.clientTable.insertRow(0)
+                self.clientTable.setItem(0, 0, QTableWidgetItem(client.macAddr))
+                vendor = self.ouiLookup(client.macAddr)
+                self.clientTable.setItem(0, 1, QTableWidgetItem(vendor))
+                self.clientTable.setItem(0, 2, QTableWidgetItem(client.apMacAddr))
+                self.clientTable.setItem(0, 3, QTableWidgetItem(client.ssid))
+                self.clientTable.setItem(0, 4, IntTableWidgetItem(str(client.signal)))
+                self.clientTable.setItem(0, 5, IntTableWidgetItem(str(client.packetCount)))
+                probes = ", ".join(client.probedSSIDs) if client.probedSSIDs else "-"
+                self.clientTable.setItem(0, 6, QTableWidgetItem(probes))
+                self.clientTable.setItem(0, 7, DateTableWidgetItem(client.lastSeen.strftime("%m/%d/%Y %H:%M:%S")))
+
+            self.filterClientTableRows()
+        finally:
+            self.clientUpdateLock.release()
 
     def ageOut(self):
         numRows = self.networkTable.rowCount()
@@ -831,6 +1008,8 @@ class mainWindow(QMainWindow):
         self.updateLock.acquire()
         try:
             self.networkTable.setRowCount(0)
+            self.clientTable.setRowCount(0)
+            WirelessEngine.detectedClients.clear()
         finally:
             self.updateLock.release()
 
@@ -862,6 +1041,24 @@ class mainWindow(QMainWindow):
         currentMode = WirelessEngine.getInterfaceMode(iface)
         targetMode = 'managed' if currentMode == 'monitor' else 'monitor'
         driver = WirelessEngine.getInterfaceDriver(iface)
+
+        # Safeguard: Do not switch the active internet interface to monitor mode
+        active_res = subprocess.run(['ip', 'route', 'show', 'default'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        active_parts = active_res.stdout.decode().split()
+        active_iface = active_parts[active_parts.index('dev') + 1] if 'dev' in active_parts else ""
+        if targetMode == 'monitor' and iface == active_iface:
+            reply = QMessageBox.question(
+                self,
+                "Warning: Active Internet Connection",
+                f"Interface '{iface}' is currently providing your active internet connection.\n\n"
+                f"Switching it to Monitor Mode will disconnect you from the internet.\n\n"
+                f"Do you want to cancel (Recommended) to stay online?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.statusBar().showMessage(f"Protected active internet connection on {iface}.")
+                return
 
         self.setCursor(Qt.WaitCursor)
         self.statusBar().showMessage(f"Switching {iface} to {targetMode} mode...")
